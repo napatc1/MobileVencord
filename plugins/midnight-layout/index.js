@@ -11,7 +11,7 @@
     const { View, Text, ScrollView, Pressable, StyleSheet } = ReactNative;
     const h = React.createElement;
 
-    const VERSION = "0.3.0";
+    const VERSION = "0.4.0";
     // every module that can draw part of the main screens (server bar, channel list, DMs, chat, tabs)
     const RX = /(main_tabs_v2\/native|channel_list_v2\/native|guilds_bar\/native|guild_sidebar\/native|home\/native|home_drawer\/native|chat\/native|chat_input\/native|you_tab|user_profile\/native\/UserPanel|notifications\/native|private_channels)/i;
 
@@ -135,10 +135,12 @@
             h(
                 Text,
                 { style: { color: "#8592AD", fontSize: 14, padding: 16, lineHeight: 20 } },
-                "Midnight look, step 3 scan. After installing: go to the Home tab, tap two different servers, open your DMs list, open the Notifications and You tabs, then come back and tap Copy report and paste it to Claude.",
+                "Midnight look: rounded chat, message box, channel list and DMs list. The channel list updates when you switch servers; the DMs list after Discord restarts. Each part has a switch below if anything looks wrong.",
             ),
             h(Row, { label: "Rounded chat panel", value: on("roundChat"), onChange: (v) => { storage.roundChat = v; force(); } }),
             h(Row, { label: "Rounded message box", value: on("roundInput"), onChange: (v) => { storage.roundInput = v; force(); } }),
+            h(Row, { label: "Rounded channel list", value: on("roundChannels"), onChange: (v) => { storage.roundChannels = v; force(); } }),
+            h(Row, { label: "Rounded DMs list", value: on("roundDMs"), onChange: (v) => { storage.roundDMs = v; force(); } }),
             h(Text, { style: { color: "#576175", fontSize: 12, paddingHorizontal: 16 } }, "Changes show the next time each screen redraws (open another channel)."),
             btn("Copy report", () => {
                 sweep();
@@ -166,8 +168,14 @@
         chat: "modules/chat/native/ChatViewWrapper.tsx",
         input: "modules/chat_input/native/ChatInput.tsx",
         layout: "modules/main_tabs_v2/native/shared_components/guild_channels/layouts/ChannelListLayout.tsx",
+        channels: "modules/channel_list_v2/native/RedesignChannelList.tsx",
+        channelsWidth: "modules/channel_list_v2/native/useChannelListWidth.tsx",
+        dms: "modules/main_tabs_v2/native/tabs/messages/Messages.tsx",
     };
-    const lookStatus = { chat: "not started", input: "not started", layout: "not started" };
+    const lookStatus = { chat: "not started", input: "not started", layout: "not started", channels: "not started", channelsWidth: "not started", dms: "not started" };
+    // channel list panel spacing; its content width is reduced by exactly this much so nothing is cut off
+    const CH = { left: 4, right: MID.gap, top: 4, bottom: MID.gap };
+    const CH_WIDTH_CUT = CH.left + CH.right + 2; // + 1px border each side
     const lookDiag = { layoutStyles: "", inputRoot: "" };
     const lookUnpatches = [];
     const on = (k) => storage[k] !== false;
@@ -264,15 +272,72 @@
         return true;
     }
 
+    // channel list: rounded panel beside the server bar (plain function -> applies on next redraw)
+    function hookChannels() {
+        if (lookStatus.channels.startsWith("ok")) return true;
+        const exp = exportsByPath(LOOK.channels);
+        if (!exp || typeof exp.default !== "function") return (lookStatus.channels = "waiting: channel list not loaded yet"), false;
+        lookUnpatches.push(
+            patcher.after("default", exp, (args, res) => {
+                lookStatus.channelsRenders = (lookStatus.channelsRenders || 0) + 1;
+                if (!on("roundChannels") || !res) return res;
+                return panel(res, { outer: { paddingLeft: CH.left, paddingRight: CH.right, paddingTop: CH.top, paddingBottom: CH.bottom } });
+            }),
+        );
+        lookStatus.channels = "ok";
+        return true;
+    }
+
+    // keep the channel list's own width calculation in step with the panel gaps
+    function hookChannelsWidth() {
+        if (lookStatus.channelsWidth.startsWith("ok")) return true;
+        const exp = exportsByPath(LOOK.channelsWidth);
+        if (!exp || typeof exp.default !== "function") return (lookStatus.channelsWidth = "waiting"), false;
+        lookUnpatches.push(
+            patcher.after("default", exp, (args, res) => {
+                if (!on("roundChannels") || typeof res !== "number" || res <= CH_WIDTH_CUT * 4) return res;
+                lookStatus.lastChannelsWidth = `${res} -> ${res - CH_WIDTH_CUT}`;
+                return res - CH_WIDTH_CUT;
+            }),
+        );
+        lookStatus.channelsWidth = "ok";
+        return true;
+    }
+
+    // DMs list: rounded panel (memo component -> applies when the tab is next built, e.g. after an app restart)
+    function hookDMs() {
+        if (lookStatus.dms.startsWith("ok")) return true;
+        const exp = exportsByPath(LOOK.dms);
+        const comp = exp && exp.default;
+        if (!comp) return (lookStatus.dms = "waiting: DMs not loaded yet"), false;
+        const cb = (args, res) => {
+            lookStatus.dmsRenders = (lookStatus.dmsRenders || 0) + 1;
+            if (!on("roundDMs") || !res) return res;
+            return panel(res, { outer: { paddingTop: 0 } });
+        };
+        let un = null;
+        if (comp.type && typeof comp.type.render === "function") un = patcher.after("render", comp.type, cb);
+        else if (typeof comp.render === "function") un = patcher.after("render", comp, cb);
+        else if (typeof comp.type === "function") un = patcher.after("type", comp, cb);
+        if (!un) return (lookStatus.dms = "failed: unknown component shape"), false;
+        lookUnpatches.push(un);
+        lookStatus.dms = "ok";
+        return true;
+    }
+
     function applyLook() {
         safe(hookChat);
         safe(hookInput);
         safe(hookLayout);
+        safe(hookChannels);
+        safe(hookChannelsWidth);
+        safe(hookDMs);
     }
 
     function lookReport() {
         return [
             `--- look: chat ${lookStatus.chat} (${lookStatus.chatRenders || 0} draws) · chat box ${lookStatus.input} (${lookStatus.inputRenders || 0} draws) · layout ${lookStatus.layout}`,
+            `--- channel list ${lookStatus.channels} (${lookStatus.channelsRenders || 0} draws) · width ${lookStatus.channelsWidth} ${lookStatus.lastChannelsWidth || ""} · DMs ${lookStatus.dms} (${lookStatus.dmsRenders || 0} draws)`,
             `--- chat box root: ${lookDiag.inputRoot}`,
             `--- channel list layout styles:\n${lookDiag.layoutStyles || "(not drawn yet - open a server's channel list)"}`,
         ].join("\n");
@@ -290,7 +355,7 @@
                 if (++tries < 40) timer = setTimeout(loop, 3000); // keep catching screens as they load (2 min)
             };
             loop();
-            toast(`Midnight Layout ${VERSION}: tap two servers, open DMs, Notifications and You, then copy the report`);
+            toast(`Midnight Layout ${VERSION}: switch servers to see the rounded channel list`);
         },
         onUnload() {
             stopped = true;

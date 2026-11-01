@@ -1,6 +1,6 @@
 {
   "name": "Midnight Layout",
-  "description": "midnight's rounded, floating-panel look for Kettu: rounded chat panel and message box (more coming).",
+  "description": "midnight's rounded, floating-panel look for Kettu: rounded chat, message box, channel list and DMs list.",
   "authors": [
     {
       "name": "napatc1",
@@ -8,7 +8,7 @@
     }
   ],
   "main": "index.js",
-  "hash": "88ec9c79c51a73d141fbd2da005f712793e493bd6340e01c7e39ec0d2062f1fa",
+  "hash": "d941d857a3f2bda55acd74df85c210469ca62c4914c12c38a5b3de1325e483d0",
   "vendetta": {
     "icon": "ic_theme_24px"
   }
