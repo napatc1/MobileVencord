@@ -1,6 +1,6 @@
 {
   "name": "BetterFolders",
-  "description": "Open server folders in a separate column (like Vencord), hide server icons in collapsed folders, auto-collapse. Rebuilt for Kettu.",
+  "description": "Tap a folder to see its servers in a bottom sheet (folder stays closed), hide server icons, auto-collapse. Rebuilt for Kettu.",
   "authors": [
     {
       "name": "fres",
@@ -8,7 +8,7 @@
     }
   ],
   "main": "index.js",
-  "hash": "40c2d6a0669065d47916e444d7f4d35ce511cd80c9887feb0398b999bbad860c",
+  "hash": "e2726df6bd0b3145209a902f8d5c9eb697a5029da908f27a7f78229e7d65f893",
   "vendetta": {
     "icon": "img_guild_folder"
   }

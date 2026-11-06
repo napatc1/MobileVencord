@@ -10,7 +10,7 @@
     const { React, ReactNative, FluxDispatcher } = metro.common;
     const { View, Text, Image, ScrollView, Switch, Pressable, Modal, Linking } = ReactNative;
 
-    const VERSION = "1.6.0";
+    const VERSION = "1.7.0";
     const status = { autoCollapse: "not started", hideIcons: "not started", column: "not started", nav: "unused" };
     const stats = { renders: 0, previewPatched: 0, hostAttached: 0, hostMounted: false, attachMode: "none" };
     const unpatches = [];
@@ -128,7 +128,7 @@
                         // keep the folder closed in the main list, show its servers in the column instead
                         if (isExpanded(thisId)) toggle(thisId);
                         if (stats.hostMounted) setOpenFolder(openFolderId === thisId ? null : thisId);
-                        else if (!openAlertColumn(thisId) && isExpanded(thisId) === false) toggle(thisId); // reopen normally if the pop-up failed
+                        else if (!openFolderView(thisId) && isExpanded(thisId) === false) toggle(thisId); // open normally if it failed
                         return;
                     }
                     if (storage.column && !warnedNoHost) {
@@ -318,8 +318,8 @@
                 }),
             );
         return h(
-            View,
-            { ref: rootRef, onLayout: measure, style: { width: win.width, height: win.height } },
+            Pressable,
+            { ref: rootRef, onLayout: measure, onPress: () => close(false), style: { width: win.width, height: win.height } },
             h(
                 View,
                 { style: { position: "absolute", left: -offset.x, top: -offset.y, width: win.width, height: win.height } },
@@ -339,6 +339,82 @@
             ),
         );
     }
+    // ── bottom sheet view (default): Discord's own action sheet, swipe down to close ──
+    const SHEET_KEY = "betterfolders-folder";
+    let sheetsCache = null;
+    const getSheets = () => {
+        if (!sheetsCache) sheetsCache = safe(() => metro.findByProps("openLazy", "hideActionSheet"), null);
+        return sheetsCache;
+    };
+    const getActionSheet = () => safe(() => metro.findByProps("ActionSheet").ActionSheet, null);
+    const closeSheet = () => safe(() => getSheets().hideActionSheet(SHEET_KEY));
+
+    function SheetTile({ id, selected }) {
+        const g = safe(() => GuildStore.getGuild(id), null);
+        if (!g) return null;
+        const url = iconUrl(g);
+        const initials = (g.name || "?").split(/\s+/).map((w) => w[0]).join("").slice(0, 3);
+        const iconStyle = { width: 56, height: 56, borderRadius: selected ? 18 : 28 };
+        return h(
+            Pressable,
+            {
+                onPress: () => {
+                    closeSheet();
+                    setTimeout(() => openGuild(id), 120);
+                },
+                style: { width: "25%", alignItems: "center", paddingVertical: 8 },
+            },
+            url
+                ? h(Image, { source: { uri: url }, style: iconStyle })
+                : h(View, { style: [iconStyle, { backgroundColor: COLORS.tile, justifyContent: "center", alignItems: "center" }] },
+                    h(Text, { style: { color: COLORS.text, fontSize: 15, fontWeight: "600" } }, initials)),
+            h(Text, { numberOfLines: 1, style: { color: selected ? COLORS.text : COLORS.sub, fontSize: 11, marginTop: 6, maxWidth: 76, textAlign: "center" } }, g.name),
+        );
+    }
+
+    function FolderSheet({ folderId }) {
+        const folder = getFolder(folderId);
+        const selectedId = safe(() => SelectedGuildStore.getGuildId(), null);
+        const tint = folder && typeof folder.folderColor === "number" ? "#" + folder.folderColor.toString(16).padStart(6, "0") : COLORS.selected;
+        const body = !folder
+            ? h(Text, { style: { color: COLORS.sub, padding: 24, textAlign: "center" } }, "Folder not found")
+            : h(
+                  View,
+                  { style: { paddingHorizontal: 12, paddingBottom: 24 } },
+                  h(
+                      View,
+                      { style: { flexDirection: "row", alignItems: "center", paddingHorizontal: 8, paddingTop: 4, paddingBottom: 12 } },
+                      h(Image, { source: asset("img_guild_folder"), style: { width: 22, height: 22, tintColor: tint, marginRight: 10 } }),
+                      h(Text, { numberOfLines: 1, style: { flex: 1, color: COLORS.text, fontSize: 17, fontWeight: "700" } }, folder.folderName || "Folder"),
+                      h(Text, { style: { color: COLORS.sub, fontSize: 13 } }, `${(folder.guildIds || []).length} servers`),
+                  ),
+                  h(
+                      View,
+                      { style: { flexDirection: "row", flexWrap: "wrap" } },
+                      (folder.guildIds || []).map((id) => h(SheetTile, { key: id, id, selected: id === selectedId })),
+                  ),
+              );
+        const AS = getActionSheet();
+        stats.lastPopup = AS ? "sheet shown" : "sheet shown (plain, ActionSheet missing)";
+        return AS ? h(AS, null, body) : h(View, { style: { backgroundColor: COLORS.panel, borderTopLeftRadius: 16, borderTopRightRadius: 16 } }, body);
+    }
+
+    function openSheetFolder(folderId) {
+        const S = getSheets();
+        const ok = safe(() => {
+            S.openLazy(Promise.resolve({ default: FolderSheet }), SHEET_KEY, { folderId });
+            return true;
+        }, false);
+        stats.alertMode = ok ? "sheet ok" : "sheet failed";
+        return ok;
+    }
+
+    // which view a folder tap opens
+    function openFolderView(folderId) {
+        if (storage.columnPopup) return openAlertColumn(folderId);
+        return openSheetFolder(folderId);
+    }
+
     function openAlertColumn(folderId) {
         if (alertOpenFor === folderId) return closeAlertColumn();
         if (alertOpenFor != null) closeAlertColumn();
@@ -752,12 +828,20 @@
             ScrollView,
             { style: { flex: 1, paddingTop: 10 } },
             h(Row, {
-                label: "Folder column",
-                sub: "Open folders in a separate column next to the server list (like Vencord).",
+                label: "Open folders in their own view",
+                sub: "Tapping a folder keeps it closed and shows its servers in a panel. Off = folders open normally.",
                 value: !!storage.column,
                 onChange: set("column"),
             }),
             storage.column
+                ? h(Row, {
+                      label: "Use column instead of bottom sheet (experimental)",
+                      sub: "Vencord-style side column. Didn't display on your iPhone in 1.5-1.6; the bottom sheet is the reliable option.",
+                      value: !!storage.columnPopup,
+                      onChange: set("columnPopup"),
+                  })
+                : null,
+            storage.column && storage.columnPopup
                 ? h(Stepper, {
                       label: "Column position",
                       value: typeof storage.columnLeft === "number" ? storage.columnLeft : barWidth,
