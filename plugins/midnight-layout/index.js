@@ -11,7 +11,7 @@
     const { View, Text, ScrollView, Pressable, StyleSheet } = ReactNative;
     const h = React.createElement;
 
-    const VERSION = "0.4.0";
+    const VERSION = "0.4.1";
     // every module that can draw part of the main screens (server bar, channel list, DMs, chat, tabs)
     const RX = /(main_tabs_v2\/native|channel_list_v2\/native|guilds_bar\/native|guild_sidebar\/native|home\/native|home_drawer\/native|chat\/native|chat_input\/native|you_tab|user_profile\/native\/UserPanel|notifications\/native|private_channels)/i;
 
@@ -355,7 +355,10 @@
                 if (++tries < 40) timer = setTimeout(loop, 3000); // keep catching screens as they load (2 min)
             };
             loop();
-            toast(`Midnight Layout ${VERSION}: switch servers to see the rounded channel list`);
+            if (storage.announcedVersion !== VERSION) {
+                storage.announcedVersion = VERSION;
+                toast(`Midnight Layout updated to ${VERSION}: switch servers to see the rounded channel list`);
+            }
         },
         onUnload() {
             stopped = true;

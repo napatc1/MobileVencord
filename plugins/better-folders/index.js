@@ -10,7 +10,7 @@
     const { React, ReactNative, FluxDispatcher } = metro.common;
     const { View, Text, Image, ScrollView, Switch, Pressable, Modal, Linking } = ReactNative;
 
-    const VERSION = "1.5.2";
+    const VERSION = "1.5.3";
     const status = { autoCollapse: "not started", hideIcons: "not started", column: "not started", nav: "unused" };
     const stats = { renders: 0, previewPatched: 0, hostAttached: 0, hostMounted: false, attachMode: "none" };
     const unpatches = [];
@@ -191,7 +191,7 @@
         return h(ColumnView, { folderId, onClose: () => setOpenFolder(null) });
     }
 
-    function ColumnView({ folderId, onClose }) {
+    function ColumnView({ folderId, onClose, visible, onShow }) {
         const folder = folderId != null ? getFolder(folderId) : null;
         if (!folder) return null;
         const selectedId = safe(() => SelectedGuildStore.getGuildId(), null);
@@ -201,8 +201,9 @@
         return h(
             Modal,
             {
-                transparent: true, visible: true, animationType: "fade",
+                transparent: true, visible: visible !== false, animationType: "fade",
                 onRequestClose: () => onClose(),
+                onShow: () => onShow && onShow(),
                 supportedOrientations: ["portrait", "landscape"],
             },
             h(
@@ -254,16 +255,62 @@
         }, false);
         stats.lastClose = ok ? "closed" : "close failed (alerts module not found)";
     }
+    // Shown inside Discord's alert layer. Safety rules, so the dimmed layer can never get stuck:
+    //  - the column (an RN Modal) is only presented after the alert has finished animating in,
+    //    because iOS drops a modal that is presented while another presentation is in progress;
+    //  - if the column hasn't appeared 1.5 s later, the alert is closed and the folder opens normally;
+    //  - a tap anywhere on the alert's own area closes it;
+    //  - after 2 failures in a row the column turns itself off (folders then open normally).
     function ColumnAlert({ folderId }) {
         const [open, setOpen] = React.useState(true);
+        const [ready, setReady] = React.useState(false);
+        const shown = React.useRef(false);
+        const closed = React.useRef(false);
+        const close = (openFolderNormally) => {
+            if (closed.current) return;
+            closed.current = true;
+            setOpen(false);
+            closeAlertColumn();
+            if (openFolderNormally) setTimeout(() => safe(() => !isExpanded(folderId) && toggle(folderId)), 150);
+        };
+        React.useEffect(() => {
+            if (!getFolder(folderId)) {
+                stats.lastPopup = "folder not found";
+                close(true);
+                return undefined;
+            }
+            const t1 = setTimeout(() => setReady(true), 350);
+            const t2 = setTimeout(() => {
+                if (shown.current || closed.current) return;
+                storage.columnFails = (storage.columnFails || 0) + 1;
+                stats.lastPopup = `column didn't appear (fail ${storage.columnFails})`;
+                if (storage.columnFails >= 2) {
+                    storage.column = false;
+                    toast("BetterFolders: folder column turned off (it couldn't open). Folders open normally now.");
+                } else toast("BetterFolders: column didn't open, opening the folder normally");
+                close(true);
+            }, 350 + 1500);
+            return () => {
+                clearTimeout(t1);
+                clearTimeout(t2);
+            };
+        }, []);
         if (!open) return null;
-        return h(ColumnView, {
-            folderId,
-            onClose: () => {
-                setOpen(false);
-                closeAlertColumn();
-            },
-        });
+        const win = safe(() => ReactNative.Dimensions.get("window"), { width: 500, height: 1000 });
+        return h(
+            Pressable,
+            { onPress: () => close(false), style: { width: win.width, height: win.height } },
+            h(ColumnView, {
+                folderId,
+                visible: ready,
+                onShow: () => {
+                    shown.current = true;
+                    storage.columnFails = 0;
+                    stats.lastPopup = "column shown";
+                },
+                onClose: () => close(false),
+            }),
+        );
     }
     function openAlertColumn(folderId) {
         if (alertOpenFor === folderId) return closeAlertColumn();
@@ -571,13 +618,11 @@
             tries++;
             if (safe(startGuildContainerPatch, false)) {
                 setTimeout(refreshFolders, 200);
-                if (tries > 1) toast(`BetterFolders ${VERSION} | hooked after ${tries}s | column: ${status.column}`);
                 return;
             }
             if (tries >= 120) {
                 status.hideIcons = "failed: GuildContainer not found after 2 min";
                 status.column = "failed: nowhere to mount (GuildContainer not found)";
-                toast(`BetterFolders: ${status.column}`);
                 return;
             }
             retryTimer = setTimeout(attempt, 1000);
@@ -671,6 +716,7 @@
             storage[key] = v;
             if (key === "hideIcons") setTimeout(refreshFolders, 100);
             if (key === "column" && !v) setOpenFolder(null);
+            if (key === "column" && v) storage.columnFails = 0;
             force();
         };
         const line = (t) => h(Text, { style: { color: COLORS.sub, fontSize: 12, paddingHorizontal: 16, marginTop: 4 } }, t);
@@ -709,7 +755,7 @@
             line(`Open server via: ${status.nav}`),
             line(`Auto collapse: ${status.autoCollapse}`),
             line(`Hide icons: ${status.hideIcons}`),
-            line(`popup ${stats.alertMode || "unused"} (alerts api ${getAlerts() ? "found" : "missing"}, last close: ${stats.lastClose || "none"})`),
+            line(`popup ${stats.alertMode || "unused"} (alerts api ${getAlerts() ? "found" : "missing"}, last close: ${stats.lastClose || "none"}, last popup: ${stats.lastPopup || "none"})`),
             line(`chat hook ${stats.msgHook} · chat renders ${stats.msgRenders || 0} · host ${stats.hostMounted ? "mounted" : "not mounted"}`),
             line(`preloaded ${stats.preloaded || 0} · renders ${stats.renders} · preview ${stats.previewPatched} · attached ${stats.hostAttached} (${stats.attachMode}) · host ${stats.hostMounted ? "mounted" : "not mounted"}`),
             h(
@@ -735,11 +781,6 @@
             msgHooked = false;
             hookMessagesWhenReady();
             patchWhenReady();
-            // if the bar was already on screen when we hooked it, React keeps the old version until a reload
-            setTimeout(() => {
-                if (!stopped && stats.renders === 0 && !stats.rowRenders && !stats.msgRenders && status.column.startsWith("ok"))
-                    toast("BetterFolders: reload Discord once to finish setup (Settings → Kettu → Reload Discord)");
-            }, 4000);
             if (status.autoCollapse !== "ok") status.column = status.autoCollapse;
             setTimeout(() => {
                 // start with every folder closed so the column is the only way folders open
@@ -749,7 +790,11 @@
             }, 300);
             const msg = `BetterFolders ${VERSION} | column: ${status.column} | icons: ${status.hideIcons}`;
             safe(() => logger.log(msg));
-            toast(msg);
+            // only announce once per version, not on every app start
+            if (storage.announcedVersion !== VERSION) {
+                storage.announcedVersion = VERSION;
+                toast(`BetterFolders updated to ${VERSION}`);
+            }
         },
         onUnload() {
             stopped = true;
