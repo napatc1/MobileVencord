@@ -11,7 +11,7 @@
     const { View, Text, ScrollView, Pressable, StyleSheet } = ReactNative;
     const h = React.createElement;
 
-    const VERSION = "0.4.1";
+    const VERSION = "0.5.0";
     // every module that can draw part of the main screens (server bar, channel list, DMs, chat, tabs)
     const RX = /(main_tabs_v2\/native|channel_list_v2\/native|guilds_bar\/native|guild_sidebar\/native|home\/native|home_drawer\/native|chat\/native|chat_input\/native|you_tab|user_profile\/native\/UserPanel|notifications\/native|private_channels)/i;
 
@@ -163,7 +163,9 @@
     }
 
     // ── step 2: midnight look ─────────────────────────────────────────────
-    const MID = { frame: "#1C1F26", panel: "#16181D", raised: "#2B303B", border: "#53607A33", gap: 8, radius: 16 };
+    // Stronger than desktop midnight on purpose: on a phone only one panel shows at a time, so the
+    // desktop's 20%-alpha border and 8pt gaps read as a plain recolour. Same palette, visible structure.
+    const MID = { frame: "#1C1F26", panel: "#16181D", raised: "#2B303B", border: "#2B303B", gap: 10, radius: 20 };
     const LOOK = {
         chat: "modules/chat/native/ChatViewWrapper.tsx",
         input: "modules/chat_input/native/ChatInput.tsx",
