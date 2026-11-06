@@ -10,7 +10,7 @@
     const { React, ReactNative, FluxDispatcher } = metro.common;
     const { View, Text, Image, ScrollView, Switch, Pressable, Modal, Linking } = ReactNative;
 
-    const VERSION = "1.5.3";
+    const VERSION = "1.6.0";
     const status = { autoCollapse: "not started", hideIcons: "not started", column: "not started", nav: "unused" };
     const stats = { renders: 0, previewPatched: 0, hostAttached: 0, hostMounted: false, attachMode: "none" };
     const unpatches = [];
@@ -191,48 +191,53 @@
         return h(ColumnView, { folderId, onClose: () => setOpenFolder(null) });
     }
 
-    function ColumnView({ folderId, onClose, visible, onShow }) {
-        const folder = folderId != null ? getFolder(folderId) : null;
-        if (!folder) return null;
+    // The column layout itself (no Modal), so it can be drawn either inside an RN Modal (old
+    // host mode) or directly inside Discord's alert layer (pop-up mode).
+    function ColumnBody({ folder, onClose, dimRight, onColumnLayout }) {
         const selectedId = safe(() => SelectedGuildStore.getGuildId(), null);
         const left = typeof storage.columnLeft === "number" ? storage.columnLeft : barWidth;
         const tint = typeof folder.folderColor === "number" ? "#" + folder.folderColor.toString(16).padStart(6, "0") : COLORS.selected;
+        return h(
+            View,
+            { style: { flex: 1, flexDirection: "row" } },
+            // tap the server list area to close too
+            h(Pressable, { style: { width: left }, onPress: () => onClose() }),
+            h(
+                View,
+                {
+                    onLayout: onColumnLayout,
+                    style: {
+                        width: 68, backgroundColor: COLORS.panel, paddingTop: 12, paddingBottom: 12,
+                        marginTop: 52, marginBottom: 24, marginLeft: 4, borderRadius: 16,
+                        borderWidth: 1, borderColor: COLORS.border, overflow: "hidden",
+                    },
+                },
+                h(Image, {
+                    source: asset("img_guild_folder"),
+                    style: { alignSelf: "center", width: 24, height: 24, tintColor: tint, marginBottom: 8 },
+                }),
+                h(View, { style: { height: 1, marginHorizontal: 16, marginBottom: 6, backgroundColor: COLORS.border } }),
+                h(
+                    ScrollView,
+                    { contentContainerStyle: { paddingVertical: 4 }, showsVerticalScrollIndicator: false },
+                    (folder.guildIds || []).map((id) => h(GuildTile, { key: id, id, selected: id === selectedId, onClose })),
+                ),
+            ),
+            h(Pressable, { style: { flex: 1, backgroundColor: dimRight ? "#00000055" : "transparent" }, onPress: () => onClose() }),
+        );
+    }
 
+    function ColumnView({ folderId, onClose }) {
+        const folder = folderId != null ? getFolder(folderId) : null;
+        if (!folder) return null;
         return h(
             Modal,
             {
-                transparent: true, visible: visible !== false, animationType: "fade",
+                transparent: true, visible: true, animationType: "fade",
                 onRequestClose: () => onClose(),
-                onShow: () => onShow && onShow(),
                 supportedOrientations: ["portrait", "landscape"],
             },
-            h(
-                View,
-                { style: { flex: 1, flexDirection: "row" } },
-                // tap the server list area to close too
-                h(Pressable, { style: { width: left }, onPress: () => onClose() }),
-                h(
-                    View,
-                    {
-                        style: {
-                            width: 68, backgroundColor: COLORS.panel, paddingTop: 12, paddingBottom: 12,
-                            marginTop: 52, marginBottom: 24, marginLeft: 4, borderRadius: 16,
-                            borderWidth: 1, borderColor: COLORS.border, overflow: "hidden",
-                        },
-                    },
-                    h(Image, {
-                        source: asset("img_guild_folder"),
-                        style: { alignSelf: "center", width: 24, height: 24, tintColor: tint, marginBottom: 8 },
-                    }),
-                    h(View, { style: { height: 1, marginHorizontal: 16, marginBottom: 6, backgroundColor: COLORS.border } }),
-                    h(
-                        ScrollView,
-                        { contentContainerStyle: { paddingVertical: 4 }, showsVerticalScrollIndicator: false },
-                        (folder.guildIds || []).map((id) => h(GuildTile, { key: id, id, selected: id === selectedId, onClose })),
-                    ),
-                ),
-                h(Pressable, { style: { flex: 1, backgroundColor: "#00000055" }, onPress: () => onClose() }),
-            ),
+            h(ColumnBody, { folder, onClose, dimRight: true }),
         );
     }
 
@@ -255,17 +260,21 @@
         }, false);
         stats.lastClose = ok ? "closed" : "close failed (alerts module not found)";
     }
-    // Shown inside Discord's alert layer. Safety rules, so the dimmed layer can never get stuck:
-    //  - the column (an RN Modal) is only presented after the alert has finished animating in,
-    //    because iOS drops a modal that is presented while another presentation is in progress;
-    //  - if the column hasn't appeared 1.5 s later, the alert is closed and the folder opens normally;
-    //  - a tap anywhere on the alert's own area closes it;
+    // Drawn directly inside Discord's alert layer (no second pop-up: iOS refuses to present a
+    // Modal on top of the alert). The alert's content area may be centred or padded, so we measure
+    // where we ended up on screen and shift the column back to the real screen edges.
+    // Safety rules, so the dimmed layer can never get stuck:
+    //  - if the column hasn't been laid out 1.5 s after opening, close and open the folder normally;
+    //  - tapping anywhere closes it; it also closes itself after 20 s without a tap;
     //  - after 2 failures in a row the column turns itself off (folders then open normally).
     function ColumnAlert({ folderId }) {
         const [open, setOpen] = React.useState(true);
-        const [ready, setReady] = React.useState(false);
+        const [offset, setOffset] = React.useState({ x: 0, y: 0 });
+        const rootRef = React.useRef(null);
         const shown = React.useRef(false);
         const closed = React.useRef(false);
+        const folder = getFolder(folderId);
+        const win = safe(() => ReactNative.Dimensions.get("window"), { width: 414, height: 896 });
         const close = (openFolderNormally) => {
             if (closed.current) return;
             closed.current = true;
@@ -274,42 +283,60 @@
             if (openFolderNormally) setTimeout(() => safe(() => !isExpanded(folderId) && toggle(folderId)), 150);
         };
         React.useEffect(() => {
-            if (!getFolder(folderId)) {
+            if (!folder) {
                 stats.lastPopup = "folder not found";
                 close(true);
                 return undefined;
             }
-            const t1 = setTimeout(() => setReady(true), 350);
-            const t2 = setTimeout(() => {
+            const watchdog = setTimeout(() => {
                 if (shown.current || closed.current) return;
                 storage.columnFails = (storage.columnFails || 0) + 1;
                 stats.lastPopup = `column didn't appear (fail ${storage.columnFails})`;
                 if (storage.columnFails >= 2) {
                     storage.column = false;
+                    storage.columnAutoOff = true;
                     toast("BetterFolders: folder column turned off (it couldn't open). Folders open normally now.");
                 } else toast("BetterFolders: column didn't open, opening the folder normally");
                 close(true);
-            }, 350 + 1500);
+            }, 1500);
+            const idle = setTimeout(() => {
+                stats.lastPopup = "closed after 20 s idle";
+                close(false);
+            }, 20000);
             return () => {
-                clearTimeout(t1);
-                clearTimeout(t2);
+                clearTimeout(watchdog);
+                clearTimeout(idle);
             };
         }, []);
-        if (!open) return null;
-        const win = safe(() => ReactNative.Dimensions.get("window"), { width: 500, height: 1000 });
+        if (!open || !folder) return null;
+        const measure = () =>
+            safe(() =>
+                rootRef.current.measureInWindow((x, y) => {
+                    if (typeof x !== "number" || typeof y !== "number") return;
+                    stats.popupOrigin = `${Math.round(x)},${Math.round(y)}`;
+                    if (Math.abs(x) > 0.5 || Math.abs(y) > 0.5) setOffset((o) => ({ x: o.x + x, y: o.y + y }));
+                }),
+            );
         return h(
-            Pressable,
-            { onPress: () => close(false), style: { width: win.width, height: win.height } },
-            h(ColumnView, {
-                folderId,
-                visible: ready,
-                onShow: () => {
-                    shown.current = true;
-                    storage.columnFails = 0;
-                    stats.lastPopup = "column shown";
-                },
-                onClose: () => close(false),
-            }),
+            View,
+            { ref: rootRef, onLayout: measure, style: { width: win.width, height: win.height } },
+            h(
+                View,
+                { style: { position: "absolute", left: -offset.x, top: -offset.y, width: win.width, height: win.height } },
+                h(ColumnBody, {
+                    folder,
+                    dimRight: false, // Discord's alert already dims the screen
+                    onClose: () => close(false),
+                    onColumnLayout: (e) => {
+                        const w = safe(() => e.nativeEvent.layout.width, 0);
+                        if (w > 0 && !shown.current) {
+                            shown.current = true;
+                            storage.columnFails = 0;
+                            stats.lastPopup = "column shown (inline)";
+                        }
+                    },
+                }),
+            ),
         );
     }
     function openAlertColumn(folderId) {
@@ -755,7 +782,7 @@
             line(`Open server via: ${status.nav}`),
             line(`Auto collapse: ${status.autoCollapse}`),
             line(`Hide icons: ${status.hideIcons}`),
-            line(`popup ${stats.alertMode || "unused"} (alerts api ${getAlerts() ? "found" : "missing"}, last close: ${stats.lastClose || "none"}, last popup: ${stats.lastPopup || "none"})`),
+            line(`popup ${stats.alertMode || "unused"} (alerts api ${getAlerts() ? "found" : "missing"}, last close: ${stats.lastClose || "none"}, last popup: ${stats.lastPopup || "none"}, origin ${stats.popupOrigin || "?"})`),
             line(`chat hook ${stats.msgHook} · chat renders ${stats.msgRenders || 0} · host ${stats.hostMounted ? "mounted" : "not mounted"}`),
             line(`preloaded ${stats.preloaded || 0} · renders ${stats.renders} · preview ${stats.previewPatched} · attached ${stats.hostAttached} (${stats.attachMode}) · host ${stats.hostMounted ? "mounted" : "not mounted"}`),
             h(
@@ -793,6 +820,13 @@
             // only announce once per version, not on every app start
             if (storage.announcedVersion !== VERSION) {
                 storage.announcedVersion = VERSION;
+                // 1.5.3 switched the column off without remembering why; treat 2+ failures as automatic
+                const autoOff = storage.columnAutoOff || (storage.column === false && (storage.columnFails || 0) >= 2);
+                storage.columnFails = 0;
+                if (autoOff) {
+                    storage.columnAutoOff = false;
+                    storage.column = true;
+                }
                 toast(`BetterFolders updated to ${VERSION}`);
             }
         },
