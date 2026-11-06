@@ -10,7 +10,7 @@
     const { React, ReactNative, FluxDispatcher } = metro.common;
     const { View, Text, Image, ScrollView, Switch, Pressable, Modal, Linking } = ReactNative;
 
-    const VERSION = "1.7.0";
+    const VERSION = "1.8.0";
     const status = { autoCollapse: "not started", hideIcons: "not started", column: "not started", nav: "unused" };
     const stats = { renders: 0, previewPatched: 0, hostAttached: 0, hostMounted: false, attachMode: "none" };
     const unpatches = [];
@@ -349,9 +349,35 @@
     const getActionSheet = () => safe(() => metro.findByProps("ActionSheet").ActionSheet, null);
     const closeSheet = () => safe(() => getSheets().hideActionSheet(SHEET_KEY));
 
+    // unread / mention info, same source as the server bar
+    // looked up when needed (not at plugin start), so a late-loading store can't silently break badges
+    let readStoreCache = null;
+    const getReadStore = () => readStoreCache || (readStoreCache = safe(() => metro.findByStoreName("GuildReadStateStore"), null));
+    const mentionsOf = (id) => {
+        const n = safe(() => getReadStore().getMentionCount(id), 0);
+        return typeof n === "number" && n > 0 ? n : 0;
+    };
+    const unreadOf = (id) => !!safe(() => getReadStore().hasUnread(id), false);
+    const BADGE = { red: "#CA6E8C", ring: "#16181D", text: "#FFFFFF" };
+    const MentionBadge = ({ count, size }) =>
+        h(
+            View,
+            {
+                style: {
+                    position: "absolute", right: size === "big" ? -4 : -6, bottom: -4,
+                    minWidth: 24, height: 24, paddingHorizontal: 6, borderRadius: 12,
+                    backgroundColor: BADGE.red, borderWidth: 3, borderColor: BADGE.ring,
+                    alignItems: "center", justifyContent: "center",
+                },
+            },
+            h(Text, { style: { color: BADGE.text, fontSize: 12, fontWeight: "800" } }, count > 99 ? "99+" : String(count)),
+        );
+
     function SheetTile({ id, selected }) {
         const g = safe(() => GuildStore.getGuild(id), null);
         if (!g) return null;
+        const mentions = mentionsOf(id);
+        const unread = !mentions && unreadOf(id);
         const url = iconUrl(g);
         const initials = (g.name || "?").split(/\s+/).map((w) => w[0]).join("").slice(0, 3);
         const iconStyle = { width: 56, height: 56, borderRadius: selected ? 18 : 28 };
@@ -364,16 +390,32 @@
                 },
                 style: { width: "25%", alignItems: "center", paddingVertical: 8 },
             },
-            url
-                ? h(Image, { source: { uri: url }, style: iconStyle })
-                : h(View, { style: [iconStyle, { backgroundColor: COLORS.tile, justifyContent: "center", alignItems: "center" }] },
-                    h(Text, { style: { color: COLORS.text, fontSize: 15, fontWeight: "600" } }, initials)),
-            h(Text, { numberOfLines: 1, style: { color: selected ? COLORS.text : COLORS.sub, fontSize: 11, marginTop: 6, maxWidth: 76, textAlign: "center" } }, g.name),
+            h(
+                View,
+                { style: { width: 56, height: 56 } },
+                url
+                    ? h(Image, { source: { uri: url }, style: iconStyle })
+                    : h(View, { style: [iconStyle, { backgroundColor: COLORS.tile, justifyContent: "center", alignItems: "center" }] },
+                        h(Text, { style: { color: COLORS.text, fontSize: 15, fontWeight: "600" } }, initials)),
+                mentions ? h(MentionBadge, { count: mentions }) : null,
+                // small white dot for unread without mentions, like the server bar's unread pill
+                unread ? h(View, { style: { position: "absolute", left: -10, top: 22, width: 6, height: 12, borderRadius: 3, backgroundColor: COLORS.text } }) : null,
+            ),
+            h(Text, { numberOfLines: 1, style: { color: selected || mentions || unread ? COLORS.text : COLORS.sub, fontSize: 11, marginTop: 6, maxWidth: 76, textAlign: "center" } }, g.name),
         );
     }
 
     function FolderSheet({ folderId }) {
+        const [, force] = React.useReducer((x) => x + 1, 0);
+        React.useEffect(() => {
+            const RS = getReadStore();
+            if (!RS || typeof RS.addChangeListener !== "function") return undefined;
+            RS.addChangeListener(force);
+            return () => safe(() => RS.removeChangeListener(force));
+        }, []);
         const folder = getFolder(folderId);
+        const total = folder ? (folder.guildIds || []).reduce((a, id) => a + mentionsOf(id), 0) : 0;
+        stats.badges = getReadStore() ? "GuildReadStateStore ok" : "GuildReadStateStore missing";
         const selectedId = safe(() => SelectedGuildStore.getGuildId(), null);
         const tint = folder && typeof folder.folderColor === "number" ? "#" + folder.folderColor.toString(16).padStart(6, "0") : COLORS.selected;
         const body = !folder
@@ -386,6 +428,10 @@
                       { style: { flexDirection: "row", alignItems: "center", paddingHorizontal: 8, paddingTop: 4, paddingBottom: 12 } },
                       h(Image, { source: asset("img_guild_folder"), style: { width: 22, height: 22, tintColor: tint, marginRight: 10 } }),
                       h(Text, { numberOfLines: 1, style: { flex: 1, color: COLORS.text, fontSize: 17, fontWeight: "700" } }, folder.folderName || "Folder"),
+                      total
+                          ? h(View, { style: { minWidth: 24, height: 22, paddingHorizontal: 7, borderRadius: 11, backgroundColor: BADGE.red, alignItems: "center", justifyContent: "center", marginRight: 8 } },
+                              h(Text, { style: { color: BADGE.text, fontSize: 12, fontWeight: "800" } }, total > 99 ? "99+" : String(total)))
+                          : null,
                       h(Text, { style: { color: COLORS.sub, fontSize: 13 } }, `${(folder.guildIds || []).length} servers`),
                   ),
                   h(
@@ -867,6 +913,7 @@
             line(`Auto collapse: ${status.autoCollapse}`),
             line(`Hide icons: ${status.hideIcons}`),
             line(`popup ${stats.alertMode || "unused"} (alerts api ${getAlerts() ? "found" : "missing"}, last close: ${stats.lastClose || "none"}, last popup: ${stats.lastPopup || "none"}, origin ${stats.popupOrigin || "?"})`),
+            line(`badges: ${stats.badges || "sheet not opened yet"}`),
             line(`chat hook ${stats.msgHook} · chat renders ${stats.msgRenders || 0} · host ${stats.hostMounted ? "mounted" : "not mounted"}`),
             line(`preloaded ${stats.preloaded || 0} · renders ${stats.renders} · preview ${stats.previewPatched} · attached ${stats.hostAttached} (${stats.attachMode}) · host ${stats.hostMounted ? "mounted" : "not mounted"}`),
             h(
