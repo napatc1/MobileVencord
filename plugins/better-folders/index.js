@@ -10,7 +10,7 @@
     const { React, ReactNative, FluxDispatcher } = metro.common;
     const { View, Text, Image, ScrollView, Switch, Pressable, Modal, Linking } = ReactNative;
 
-    const VERSION = "1.5.1";
+    const VERSION = "1.5.2";
     const status = { autoCollapse: "not started", hideIcons: "not started", column: "not started", nav: "unused" };
     const stats = { renders: 0, previewPatched: 0, hostAttached: 0, hostMounted: false, attachMode: "none" };
     const unpatches = [];
@@ -237,11 +237,22 @@
 
     // Show the column through Kettu's custom alert API: Discord's alert manager is always
     // mounted, so this works without hooking any part of the server bar.
-    const AlertsMod = safe(() => metro.findByProps("openLazy", "close"));
+    // Look the alerts module up when it's needed, not at plugin start: on a fresh app start it may
+    // not be loaded yet, and closing would silently do nothing (leaving Discord's dimmed backdrop).
+    let alertsCache = null;
+    const getAlerts = () => {
+        if (!alertsCache) alertsCache = safe(() => metro.findByProps("openLazy", "close"), null);
+        return alertsCache;
+    };
     let alertOpenFor = null;
     function closeAlertColumn() {
         alertOpenFor = null;
-        safe(() => AlertsMod.close());
+        const A = getAlerts();
+        const ok = safe(() => {
+            A.close();
+            return true;
+        }, false);
+        stats.lastClose = ok ? "closed" : "close failed (alerts module not found)";
     }
     function ColumnAlert({ folderId }) {
         const [open, setOpen] = React.useState(true);
@@ -603,7 +614,7 @@
             });
             out.push(`${id} ${path} [${desc}]`);
         }
-        out.unshift(`--- popup ${stats.alertMode || "unused"} (alerts api ${AlertsMod ? "found" : "missing"}) · chat hook ${stats.msgHook} · chat renders ${stats.msgRenders || 0} · preloaded ${stats.preloaded || 0} · bar renders ${stats.renders} · drawer row renders ${stats.rowRenders || 0} · host ${stats.hostMounted ? "mounted" : "not mounted"}`, `--- drawer row props: ${diag.rowProps}`, `--- drawer row tree:\n${diag.rowTree}`, `--- folder props: ${diag.folderProps}`, `--- hide result: ${diag.hideResult} · bar width ${barWidth}`, `--- folder tree:\n${diag.folderTree}`, `--- bar tree:\n${diag.barTree}`, `--- paths:`);
+        out.unshift(`--- popup ${stats.alertMode || "unused"} (alerts api ${getAlerts() ? "found" : "missing"}, last close: ${stats.lastClose || "none"}) · chat hook ${stats.msgHook} · chat renders ${stats.msgRenders || 0} · preloaded ${stats.preloaded || 0} · bar renders ${stats.renders} · drawer row renders ${stats.rowRenders || 0} · host ${stats.hostMounted ? "mounted" : "not mounted"}`, `--- drawer row props: ${diag.rowProps}`, `--- drawer row tree:\n${diag.rowTree}`, `--- folder props: ${diag.folderProps}`, `--- hide result: ${diag.hideResult} · bar width ${barWidth}`, `--- folder tree:\n${diag.folderTree}`, `--- bar tree:\n${diag.barTree}`, `--- paths:`);
         return `BetterFolders ${VERSION} scan: ${out.length} matches (${withPath}/${total} modules have paths)\n` + (out.slice(0, 120).join("\n") || "nothing found");
     }
 
@@ -698,7 +709,7 @@
             line(`Open server via: ${status.nav}`),
             line(`Auto collapse: ${status.autoCollapse}`),
             line(`Hide icons: ${status.hideIcons}`),
-            line(`popup ${stats.alertMode || "unused"} (alerts api ${AlertsMod ? "found" : "missing"})`),
+            line(`popup ${stats.alertMode || "unused"} (alerts api ${getAlerts() ? "found" : "missing"}, last close: ${stats.lastClose || "none"})`),
             line(`chat hook ${stats.msgHook} · chat renders ${stats.msgRenders || 0} · host ${stats.hostMounted ? "mounted" : "not mounted"}`),
             line(`preloaded ${stats.preloaded || 0} · renders ${stats.renders} · preview ${stats.previewPatched} · attached ${stats.hostAttached} (${stats.attachMode}) · host ${stats.hostMounted ? "mounted" : "not mounted"}`),
             h(
