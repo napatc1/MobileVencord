@@ -10,7 +10,7 @@
     const { React, ReactNative, FluxDispatcher } = metro.common;
     const { View, Text, Image, ScrollView, Switch, Pressable, Modal, Linking } = ReactNative;
 
-    const VERSION = "1.8.0";
+    const VERSION = "1.9.0";
     const status = { autoCollapse: "not started", hideIcons: "not started", column: "not started", nav: "unused" };
     const stats = { renders: 0, previewPatched: 0, hostAttached: 0, hostMounted: false, attachMode: "none" };
     const unpatches = [];
@@ -510,6 +510,7 @@
         guild: "modules/guilds_bar/native/GuildsBarGuild.tsx",
         pressable: "modules/guilds_bar/native/GuildsBarItemIconPressable.tsx",
         drawerRow: "modules/home_drawer/native/HomeDrawerFolderRow.tsx",
+        itemWrapper: "modules/guilds_bar/native/GuildsBarAnimatedItemWrapper.tsx",
         messages: "modules/messages/native/Messages.tsx",
     };
     const ID_HINTS = {
@@ -521,6 +522,7 @@
         "modules/guilds_bar/native/GuildsBarGuild.tsx": 13035,
         "modules/guilds_bar/native/GuildsBarItemIconPressable.tsx": 13062,
         "modules/home_drawer/native/HomeDrawerFolderRow.tsx": 13022,
+        "modules/guilds_bar/native/GuildsBarAnimatedItemWrapper.tsx": 13012,
     };
     const allMods = () => safe(() => vendetta.metro.modules || window.modules, {}) || {};
     function modByPath(path) {
@@ -670,6 +672,84 @@
         attempt();
     }
 
+    // find a folder id anywhere shallow in an item's props (we don't know Discord's prop names yet)
+    function folderIdFromProps(props, folderIds) {
+        const seen = new Set();
+        let found = null;
+        const visit = (v, depth) => {
+            if (found != null || v == null || depth > 3) return;
+            if (typeof v === "number" || typeof v === "string") {
+                if (folderIds.has(String(v))) found = v;
+                return;
+            }
+            if (typeof v !== "object" || seen.has(v) || v.$$typeof) return;
+            seen.add(v);
+            for (const k of ["folderId", "id", "key", "nodeId"]) if (k in v) visit(safe(() => v[k]), depth + 1);
+            if (found != null) return;
+            for (const k of Object.keys(v).slice(0, 25)) {
+                if (k === "children" || k === "style") continue;
+                const x = safe(() => v[k]);
+                if (x && typeof x === "object") visit(x, depth + 1);
+            }
+        };
+        visit(props, 0);
+        return found;
+    }
+
+    const FolderCellOverlay = ({ folder }) => {
+        const tint = typeof folder.folderColor === "number" ? "#" + folder.folderColor.toString(16).padStart(6, "0") : COLORS.selected;
+        const total = (folder.guildIds || []).reduce((a, id) => a + mentionsOf(id), 0);
+        return h(
+            View,
+            {
+                pointerEvents: "none",
+                style: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, alignItems: "center", justifyContent: "center" },
+            },
+            storage.folderNames !== false
+                ? h(Text, { numberOfLines: 1, style: { width: 68, textAlign: "center", color: COLORS.text, fontSize: 9, fontWeight: "700", marginBottom: 2 } }, folder.folderName || "Folder")
+                : null,
+            h(
+                View,
+                {
+                    style: {
+                        width: storage.folderNames !== false ? 40 : 48, height: storage.folderNames !== false ? 40 : 48,
+                        borderRadius: 14, backgroundColor: COLORS.tile, alignItems: "center", justifyContent: "center",
+                    },
+                },
+                h(Image, { source: asset("img_guild_folder"), style: { width: 22, height: 22, tintColor: tint } }),
+                total
+                    ? h(View, { style: { position: "absolute", right: -6, bottom: -4, minWidth: 20, height: 20, paddingHorizontal: 4, borderRadius: 10, backgroundColor: BADGE.red, borderWidth: 2, borderColor: BADGE.ring, alignItems: "center", justifyContent: "center" } },
+                        h(Text, { style: { color: BADGE.text, fontSize: 10, fontWeight: "800" } }, total > 99 ? "99+" : String(total)))
+                    : null,
+            ),
+        );
+    };
+
+    function hookItemWrapper() {
+        const mod = modByPath(PATHS.itemWrapper);
+        if (!mod || typeof mod.default !== "function") {
+            stats.cells = "item wrapper not found";
+            return;
+        }
+        const un = patcher.after("default", mod, ([props], res) => {
+            stats.cellRenders = (stats.cellRenders || 0) + 1;
+            if (!stats.cellProps) stats.cellProps = safe(() => Object.keys(props || {}).join(","), "?");
+            if (!storage.hideIcons || !res) return res;
+            const folders = getFolders() || [];
+            const ids = new Set(folders.filter((f) => f.folderId != null).map((f) => String(f.folderId)));
+            if (!ids.size) return res;
+            const fid = folderIdFromProps(props, ids);
+            if (fid == null) return res;
+            if (isExpanded(fid)) return res; // open folders look normal
+            const folder = folders.find((f) => String(f.folderId) === String(fid));
+            if (!folder) return res;
+            stats.folderCells = (stats.folderCells || 0) + 1;
+            return h(View, { style: { position: "relative" } }, res, h(FolderCellOverlay, { folder }));
+        });
+        unpatches.push(un);
+        stats.cells = "hooked";
+    }
+
     function startGuildContainerPatch() {
         const barMod = modByPath(PATHS.bar);
         if (!barMod || !barMod.default) {
@@ -724,6 +804,11 @@
               })
             : null;
         if (unFolder) unpatches.push(unFolder);
+
+        // 4) server bar items: GuildsBarAnimatedItemWrapper wraps every bar item (folders too) and is a
+        //    plain function, so it applies mid-session. For closed folders we lay a folder icon + the
+        //    folder's name over the mini server icons. pointerEvents "none": taps still reach Discord.
+        safe(hookItemWrapper);
 
         // 3) home drawer layout (newer Discord): folder rows are a plain function component
         const rowMod = modByPath(PATHS.drawerRow);
@@ -906,6 +991,17 @@
                 value: !!storage.hideIcons,
                 onChange: set("hideIcons"),
             }),
+            storage.hideIcons
+                ? h(Row, {
+                      label: "Show folder name",
+                      sub: "Small folder name above the folder icon in the server bar.",
+                      value: storage.folderNames !== false,
+                      onChange: (v) => {
+                          storage.folderNames = v;
+                          force();
+                      },
+                  })
+                : null,
             h(View, { style: { height: 16 } }),
             line(`BetterFolders ${VERSION} diagnostics`),
             line(`Folder column: ${status.column}`),
@@ -914,6 +1010,7 @@
             line(`Hide icons: ${status.hideIcons}`),
             line(`popup ${stats.alertMode || "unused"} (alerts api ${getAlerts() ? "found" : "missing"}, last close: ${stats.lastClose || "none"}, last popup: ${stats.lastPopup || "none"}, origin ${stats.popupOrigin || "?"})`),
             line(`badges: ${stats.badges || "sheet not opened yet"}`),
+            line(`bar items: ${stats.cells || "not started"} · drawn ${stats.cellRenders || 0} · folder icons ${stats.folderCells || 0} · props ${stats.cellProps || "?"}`),
             line(`chat hook ${stats.msgHook} · chat renders ${stats.msgRenders || 0} · host ${stats.hostMounted ? "mounted" : "not mounted"}`),
             line(`preloaded ${stats.preloaded || 0} · renders ${stats.renders} · preview ${stats.previewPatched} · attached ${stats.hostAttached} (${stats.attachMode}) · host ${stats.hostMounted ? "mounted" : "not mounted"}`),
             h(
