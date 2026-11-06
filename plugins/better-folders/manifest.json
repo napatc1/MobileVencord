@@ -7,7 +7,7 @@
       "id": "843448897737064448"
     }
   ],
-  "main": "index.js",
+  "main": "index.js?v=95cb8eb23422",
   "hash": "95cb8eb234220ed528f740763aae13c7405e6eac784f2028a25da245a9ff24cd",
   "vendetta": {
     "icon": "img_guild_folder"

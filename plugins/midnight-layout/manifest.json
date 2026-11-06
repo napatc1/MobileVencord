@@ -7,7 +7,7 @@
       "id": "0"
     }
   ],
-  "main": "index.js",
+  "main": "index.js?v=0383f14b0dde",
   "hash": "0383f14b0ddedc24a59c20622761dd46f00d5c3941112b240a2d8de90fa8273f",
   "vendetta": {
     "icon": "ic_theme_24px"
