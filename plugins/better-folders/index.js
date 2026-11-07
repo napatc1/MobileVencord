@@ -10,7 +10,7 @@
     const { React, ReactNative, FluxDispatcher } = metro.common;
     const { View, Text, Image, ScrollView, Switch, Pressable, Modal, Linking } = ReactNative;
 
-    const VERSION = "1.9.0";
+    const VERSION = "1.9.1";
     const status = { autoCollapse: "not started", hideIcons: "not started", column: "not started", nav: "unused" };
     const stats = { renders: 0, previewPatched: 0, hostAttached: 0, hostMounted: false, attachMode: "none" };
     const unpatches = [];
@@ -703,16 +703,22 @@
             View,
             {
                 pointerEvents: "none",
-                style: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, alignItems: "center", justifyContent: "center" },
+                // solid backing in the server bar's colour so none of Discord's mini icons show around
+                // the edges (measured: folder square ~50pt wide; bar #16181D). Left 8pt stays clear for
+                // Discord's white unread/selected bar.
+                style: {
+                    position: "absolute", top: 0, bottom: 0, left: 8, right: 8,
+                    backgroundColor: "#16181D", alignItems: "center", justifyContent: "center",
+                },
             },
             storage.folderNames !== false
-                ? h(Text, { numberOfLines: 1, style: { width: 68, textAlign: "center", color: COLORS.text, fontSize: 9, fontWeight: "700", marginBottom: 2 } }, folder.folderName || "Folder")
+                ? h(Text, { numberOfLines: 1, style: { width: 56, textAlign: "center", color: COLORS.text, fontSize: 9, fontWeight: "700", marginBottom: 1 } }, folder.folderName || "Folder")
                 : null,
             h(
                 View,
                 {
                     style: {
-                        width: storage.folderNames !== false ? 40 : 48, height: storage.folderNames !== false ? 40 : 48,
+                        width: storage.folderNames !== false ? 44 : 48, height: storage.folderNames !== false ? 44 : 48,
                         borderRadius: 14, backgroundColor: COLORS.tile, alignItems: "center", justifyContent: "center",
                     },
                 },
