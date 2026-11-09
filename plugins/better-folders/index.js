@@ -10,7 +10,7 @@
     const { React, ReactNative, FluxDispatcher } = metro.common;
     const { View, Text, Image, ScrollView, Switch, Pressable, Modal, Linking } = ReactNative;
 
-    const VERSION = "1.9.2";
+    const VERSION = "1.10.0";
     const status = { autoCollapse: "not started", hideIcons: "not started", column: "not started", nav: "unused" };
     const stats = { renders: 0, previewPatched: 0, hostAttached: 0, hostMounted: false, attachMode: "none" };
     const unpatches = [];
@@ -388,6 +388,8 @@
                     closeSheet();
                     setTimeout(() => openGuild(id), 120);
                 },
+                onLongPress: () => openServerMenu(id),
+                delayLongPress: 350,
                 style: { width: "25%", alignItems: "center", paddingVertical: 8 },
             },
             h(
@@ -443,6 +445,164 @@
         const AS = getActionSheet();
         stats.lastPopup = AS ? "sheet shown" : "sheet shown (plain, ActionSheet missing)";
         return AS ? h(AS, null, body) : h(View, { style: { backgroundColor: COLORS.panel, borderTopLeftRadius: 16, borderTopRightRadius: 16 } }, body);
+    }
+
+    // ── long-press menu for a server inside the panel ──────────────────────
+    const SERVER_MENU_KEY = "betterfolders-server";
+    const lazyProps = {};
+    const byProps = (key, ...p) => lazyProps[key] || (lazyProps[key] = safe(() => metro.findByProps(...p), null));
+    const lazyStore = (name) => lazyProps["s:" + name] || (lazyProps["s:" + name] = safe(() => metro.findByStoreName(name), null));
+
+    // Discord builds its own long-press menu items for every server it draws in the bar; remember the
+    // arguments it used per server so we can ask for the same menu (servers in closed folders usually
+    // aren't drawn, so the plugin's own actions below are the main path).
+    const menuArgsByGuild = {};
+    function hookGuildMenuItems() {
+        const mod = modByPath("modules/guilds_bar/native/utils/getGuildsBarGuildMenuItems.tsx");
+        if (!mod || typeof mod.default !== "function") {
+            stats.menuHook = "not found";
+            return;
+        }
+        const guildIds = () => new Set(safe(() => Object.keys(GuildStore.getGuilds()), []));
+        unpatches.push(
+            patcher.after("default", mod, (args, res) => {
+                safe(() => {
+                    const ids = guildIds();
+                    const gid = folderIdFromProps(args, ids);
+                    if (gid != null) menuArgsByGuild[String(gid)] = args;
+                    if (!stats.menuShape) stats.menuShape = safe(() => (res || []).map((x) => Object.keys(x || {}).join("/")).join(" | "), "?");
+                });
+                return res;
+            }),
+        );
+        stats.menuHook = "hooked";
+    }
+    function discordMenuItems(guildId) {
+        const args = menuArgsByGuild[String(guildId)];
+        const mod = modByPath("modules/guilds_bar/native/utils/getGuildsBarGuildMenuItems.tsx");
+        if (!args || !mod) return [];
+        const items = safe(() => mod.default.apply(null, args), []) || [];
+        return items
+            .map((it) => ({
+                label: it && (it.label || it.title || it.text),
+                run: it && (it.action || it.onPress || it.onClick),
+                danger: it && (it.variant === "danger" || it.isDestructive),
+            }))
+            .filter((it) => typeof it.label === "string" && typeof it.run === "function");
+    }
+
+    const isMuted = (guildId) => !!safe(() => lazyStore("UserGuildSettingsStore").isMuted(guildId), false);
+    function setMuted(guildId, muted) {
+        const A = byProps("ugs", "updateGuildNotificationSettings");
+        return safe(() => {
+            A.updateGuildNotificationSettings(guildId, { muted });
+            return true;
+        }, false);
+    }
+    function markRead(guildId) {
+        // 1) a direct "ack the whole server" action if this Discord has one
+        for (const [key, fn] of [["ackGuild", "ackGuild"], ["markGuildAsRead", "markGuildAsRead"]]) {
+            const m = byProps(key, fn);
+            if (m && safe(() => {
+                m[fn](guildId);
+                return true;
+            }, false)) return fn;
+        }
+        // 2) bulk-ack every unread channel in the server
+        const RS = lazyStore("ReadStateStore");
+        const gcs = safe(() => lazyStore("GuildChannelStore").getChannels(guildId), null);
+        const chans = gcs ? [].concat(gcs.SELECTABLE || [], gcs.VOCAL || []).map((x) => (x && x.channel) || x).filter(Boolean) : [];
+        const list = chans
+            .filter((c) => safe(() => RS.hasUnread(c.id), false))
+            .map((c) => ({ channelId: c.id, messageId: safe(() => RS.lastMessageId(c.id), null), readStateType: 0 }))
+            .filter((x) => x.messageId);
+        const B = byProps("bulkAck", "bulkAck");
+        if (B && list.length && safe(() => {
+            B.bulkAck(list);
+            return true;
+        }, false)) return `bulkAck ${list.length}`;
+        return list.length ? null : "nothing unread";
+    }
+
+    function ServerMenuSheet({ guildId }) {
+        const g = safe(() => GuildStore.getGuild(guildId), null);
+        const [, force] = React.useReducer((x) => x + 1, 0);
+        const close = () => safe(() => getSheets().hideActionSheet(SERVER_MENU_KEY));
+        const row = (label, onPress, opts) =>
+            h(
+                Pressable,
+                {
+                    key: label,
+                    onPress,
+                    style: ({ pressed }) => ({
+                        paddingVertical: 14, paddingHorizontal: 18, marginHorizontal: 12, marginBottom: 6, borderRadius: 12,
+                        backgroundColor: pressed ? COLORS.tile : COLORS.panel,
+                    }),
+                },
+                h(Text, { style: { color: opts && opts.danger ? BADGE.red : COLORS.text, fontSize: 16, fontWeight: "600" } }, label),
+            );
+        const muted = isMuted(guildId);
+        const own = [
+            row("Mark as read", () => {
+                const how = markRead(guildId);
+                stats.lastMenu = `mark read: ${how || "failed"}`;
+                toast(how ? `Marked ${g ? g.name : "server"} as read` : "BetterFolders: couldn't mark as read on this Discord version");
+                close();
+            }),
+            row(muted ? "Unmute server" : "Mute server", () => {
+                const ok = setMuted(guildId, !muted);
+                stats.lastMenu = `${muted ? "unmute" : "mute"}: ${ok ? "ok" : "failed"}`;
+                toast(ok ? `${muted ? "Unmuted" : "Muted"} ${g ? g.name : "server"}` : "BetterFolders: couldn't change mute on this Discord version");
+                force();
+                close();
+            }),
+            row("Copy server ID", () => {
+                const ok = safe(() => {
+                    metro.common.clipboard.setString(String(guildId));
+                    return true;
+                }, false);
+                toast(ok ? "Copied server ID" : "BetterFolders: couldn't copy");
+                close();
+            }),
+            row("Open server", () => {
+                close();
+                setTimeout(() => openGuild(guildId), 120);
+            }),
+        ];
+        const discord = discordMenuItems(guildId).map((it) =>
+            row(it.label, () => {
+                close();
+                setTimeout(() => safe(() => it.run()), 120);
+            }, { danger: it.danger }),
+        );
+        stats.lastMenu = stats.lastMenu || `menu opened (${discord.length} Discord items)`;
+        const body = h(
+            View,
+            { style: { paddingTop: 4, paddingBottom: 24 } },
+            h(
+                View,
+                { style: { flexDirection: "row", alignItems: "center", paddingHorizontal: 20, paddingBottom: 12 } },
+                g && iconUrl(g) ? h(Image, { source: { uri: iconUrl(g) }, style: { width: 32, height: 32, borderRadius: 16, marginRight: 10 } }) : null,
+                h(Text, { numberOfLines: 1, style: { flex: 1, color: COLORS.text, fontSize: 17, fontWeight: "700" } }, g ? g.name : "Server"),
+                muted ? h(Text, { style: { color: COLORS.sub, fontSize: 12 } }, "Muted") : null,
+            ),
+            own,
+            discord.length ? h(Text, { style: { color: COLORS.sub, fontSize: 12, paddingHorizontal: 20, paddingTop: 6, paddingBottom: 6 } }, "More from Discord") : null,
+            discord,
+        );
+        const AS = getActionSheet();
+        return AS ? h(AS, null, body) : h(View, { style: { backgroundColor: COLORS.panel, borderTopLeftRadius: 16, borderTopRightRadius: 16 } }, body);
+    }
+
+    function openServerMenu(guildId) {
+        closeSheet();
+        setTimeout(() => {
+            const ok = safe(() => {
+                getSheets().openLazy(Promise.resolve({ default: ServerMenuSheet }), SERVER_MENU_KEY, { guildId });
+                return true;
+            }, false);
+            if (!ok) toast("BetterFolders: couldn't open the server menu");
+        }, 250);
     }
 
     function openSheetFolder(folderId) {
@@ -815,6 +975,7 @@
         //    plain function, so it applies mid-session. For closed folders we lay a folder icon + the
         //    folder's name over the mini server icons. pointerEvents "none": taps still reach Discord.
         safe(hookItemWrapper);
+        safe(hookGuildMenuItems);
 
         // 3) home drawer layout (newer Discord): folder rows are a plain function component
         const rowMod = modByPath(PATHS.drawerRow);
@@ -1016,6 +1177,7 @@
             line(`Hide icons: ${status.hideIcons}`),
             line(`popup ${stats.alertMode || "unused"} (alerts api ${getAlerts() ? "found" : "missing"}, last close: ${stats.lastClose || "none"}, last popup: ${stats.lastPopup || "none"}, origin ${stats.popupOrigin || "?"})`),
             line(`badges: ${stats.badges || "sheet not opened yet"}`),
+            line(`server menu: ${stats.menuHook || "not started"} · ${stats.lastMenu || "not opened"} · Discord items ${stats.menuShape || "none seen"}`),
             line(`bar items: ${stats.cells || "not started"} · drawn ${stats.cellRenders || 0} · folder icons ${stats.folderCells || 0} · props ${stats.cellProps || "?"}`),
             line(`chat hook ${stats.msgHook} · chat renders ${stats.msgRenders || 0} · host ${stats.hostMounted ? "mounted" : "not mounted"}`),
             line(`preloaded ${stats.preloaded || 0} · renders ${stats.renders} · preview ${stats.previewPatched} · attached ${stats.hostAttached} (${stats.attachMode}) · host ${stats.hostMounted ? "mounted" : "not mounted"}`),
