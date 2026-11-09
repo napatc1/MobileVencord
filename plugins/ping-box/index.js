@@ -10,7 +10,7 @@
     const { View, Text, Pressable, Linking } = ReactNative;
     const h = React.createElement;
 
-    const VERSION = "1.0.0";
+    const VERSION = "1.1.0";
     const COLORS = { text: "#E3E8F4", sub: "#8592AD", muted: "#576175", box: "#1C1F26", border: "#2B303B", red: "#CA6E8C", ring: "#16181D" };
     const CHANNEL_LIST = "modules/channel_list_v2/native/RedesignChannelList.tsx";
 
@@ -76,8 +76,48 @@
     // ── finding the ping and jumping to it ─────────────────────────────────
     const me = () => safe(() => store("UserStore").getCurrentUser().id, null);
 
-    // returns a Promise of { id, how } or null (plain promises: no async/await for Hermes runtime eval)
+    // ── searching (plain promises: no async/await for Hermes runtime eval) ──
+    const getHTTP = () => safe(() => props("http", "HTTP").HTTP, null) || props("http2", "get", "post", "patch", "del");
+    function search(guildId, query) {
+        const HTTP = getHTTP();
+        if (!HTTP || typeof HTTP.get !== "function") return Promise.reject(new Error("no HTTP"));
+        const run = () => Promise.resolve(HTTP.get({ url: `/guilds/${guildId}/messages/search`, query }));
+        return run().then((res) => {
+            // Discord answers 202 while it's still indexing a channel: wait a moment and try once more
+            if (res && res.status === 202) return new Promise((r) => setTimeout(r, 1500)).then(run);
+            return res;
+        }).then((res) => {
+            const body = (res && res.body) || {};
+            const msgs = (body.messages || []).map((arr) => (Array.isArray(arr) ? arr.find((x) => x && x.hit) || arr[0] : arr)).filter(Boolean);
+            return { msgs, total: body.total_results };
+        });
+    }
+
+    // the point where you stopped reading in a channel (several store method names across versions)
+    function lastReadId(channelId) {
+        const rs = store("ReadStateStore");
+        for (const fn of ["ackMessageId", "getAckMessageId", "lastAckedMessageId"]) {
+            const v = safe(() => rs[fn](channelId), null);
+            if (v) return v;
+        }
+        return safe(() => rs.getOldestUnreadMessageId(channelId), null);
+    }
+
+    function myRoleIds(guildId) {
+        const uid = me();
+        const member = safe(() => store("GuildMemberStore").getMember(guildId, uid), null);
+        return (member && member.roles) || [];
+    }
+
+    // does this message ping me: by name, @everyone/@here, or a role I have
+    const pingsMe = (m, uid, roles) =>
+        !!m && (m.mention_everyone ||
+            (m.mentions || []).some((u) => (u && (u.id || u)) === uid) ||
+            (m.mention_roles || []).some((r) => roles.indexOf(r) !== -1));
+
+    // returns a Promise of { id, how } (or a fallback) - never rejects
     function findPingMessageId(guildId, channelId) {
+        const notes = [];
         // a) mentions Discord already has in memory
         const recent = safe(() => {
             const rm = store("RecentMentionsStore");
@@ -86,41 +126,41 @@
             return hit && hit.id;
         }, null);
         if (recent) return Promise.resolve({ id: recent, how: "recent mentions" });
-        const firstUnread = () => {
-            // c) role/@everyone pings aren't in a "mentions" search: fall back to the first unread message
-            const unread = safe(() => {
-                const rs = store("ReadStateStore");
-                return (rs.getOldestUnreadMessageId && rs.getOldestUnreadMessageId(channelId)) || null;
-            }, null);
-            return unread ? { id: unread, how: "first unread" } : null;
-        };
-        // b) Discord's own message search: newest message in this channel that mentions you
+
         const uid = me();
-        const HTTP = safe(() => props("http", "HTTP").HTTP, null) || props("http2", "get", "post", "patch", "del");
-        if (!uid || !HTTP || typeof HTTP.get !== "function") {
-            status.lastSearch = "no search available";
-            return Promise.resolve(firstUnread());
-        }
-        let req;
-        try {
-            req = HTTP.get({ url: `/guilds/${guildId}/messages/search`, query: { mentions: uid, channel_id: channelId } });
-        } catch (e) {
-            status.lastSearch = `search failed: ${(e && e.message) || e}`;
-            return Promise.resolve(firstUnread());
-        }
-        return Promise.resolve(req).then(
-            (res) => {
-                const body = (res && res.body) || {};
-                const first = body.messages && body.messages[0] && (Array.isArray(body.messages[0]) ? body.messages[0][0] : body.messages[0]);
-                if (first && first.id) return { id: first.id, how: "search" };
-                status.lastSearch = `search returned ${body.total_results != null ? body.total_results : "?"} results`;
-                return firstUnread();
-            },
-            (e) => {
-                status.lastSearch = `search failed: ${(e && (e.status || e.message)) || e}`;
-                return firstUnread();
-            },
-        );
+        const roles = myRoleIds(guildId);
+        const ack = lastReadId(channelId);
+        notes.push(ack ? "last read found" : "no last-read point");
+
+        // b) oldest unread message that pings me (by name, @everyone or one of my roles)
+        const scanUnread = (offset) => {
+            if (!ack || offset >= 100) return Promise.resolve(null);
+            return search(guildId, { channel_id: channelId, min_id: ack, sort_by: "timestamp", sort_order: "asc", offset })
+                .then(({ msgs }) => {
+                    const hit = msgs.find((m) => pingsMe(m, uid, roles));
+                    if (hit) return { id: hit.id, how: "oldest unread ping" };
+                    if (msgs.length < 25) return null; // no more pages
+                    return scanUnread(offset + 25);
+                });
+        };
+        const newest = (query, how) =>
+            search(guildId, Object.assign({ channel_id: channelId }, query)).then(({ msgs, total }) => {
+                notes.push(`${how}: ${total != null ? total : msgs.length}`);
+                return msgs[0] ? { id: msgs[0].id, how } : null;
+            });
+        const orNext = (p, next) => p.catch((e) => {
+            notes.push(`search error ${(e && (e.status || e.message)) || e}`);
+            return null;
+        }).then((r) => r || next());
+
+        return orNext(scanUnread(0), () =>
+            orNext(uid ? newest({ mentions: uid }, "newest name ping") : Promise.resolve(null), () =>
+                orNext(newest({ mention_everyone: true }, "newest @everyone"), () =>
+                    Promise.resolve(ack ? { id: ack, how: "where you stopped reading" } : null))))
+            .then((r) => {
+                status.lastSearch = notes.join(", ");
+                return r;
+            });
     }
 
     function navigate(guildId, channelId, messageId) {
@@ -142,8 +182,15 @@
         status.lastJump = `looking for the ping in #${channel.name}…`;
         return findPingMessageId(guildId, channel.id).then((found) => {
             if (!found) {
-                status.lastJump = `no message found for #${channel.name} (${status.lastSearch || "no search"})`;
-                toast(`Ping Box: couldn't find the ping in #${channel.name}`);
+                status.lastJump = `no message found for #${channel.name} (${status.lastSearch || "no search"}) -> opened channel`;
+                const ok = safe(() => {
+                    props("trans", "transitionTo").transitionTo(`/channels/${guildId}/${channel.id}`);
+                    return true;
+                }, false) || safe(() => {
+                    Linking.openURL(`discord://-/channels/${guildId}/${channel.id}`);
+                    return true;
+                }, false);
+                toast(`Ping Box: couldn't find the exact ping in #${channel.name}${ok ? ", opened the channel" : ""} (${status.lastSearch || "no search"})`);
                 return;
             }
             const via = navigate(guildId, channel.id, found.id);
@@ -252,6 +299,7 @@
             line(`Ping Box ${VERSION} diagnostics`),
             line(`channel list hook: ${status.hook} · box draws ${status.boxRenders} · channels from ${status.channelsSource}`),
             line(`last jump: ${status.lastJump}`),
+            line(`last search: ${status.lastSearch || "none"}`),
         );
     }
 
