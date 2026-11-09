@@ -10,7 +10,7 @@
     const { View, Text, Pressable, Linking } = ReactNative;
     const h = React.createElement;
 
-    const VERSION = "1.1.2";
+    const VERSION = "1.2.0";
     const COLORS = { text: "#E3E8F4", sub: "#8592AD", muted: "#576175", box: "#1C1F26", border: "#2B303B", red: "#CA6E8C", ring: "#16181D" };
     const CHANNEL_LIST = "modules/channel_list_v2/native/RedesignChannelList.tsx";
 
@@ -175,6 +175,17 @@
                 props("trans", "transitionTo").transitionTo(path);
                 return true;
             }, false);
+        // 1) Discord's internal link handler - what the working "Jump To Top" plugin uses on mobile
+        const viaOpenUrl = safe(() => {
+            props("openUrl", "openUrl").openUrl(`https://discord.com${path}`);
+            return true;
+        }, false);
+        if (viaOpenUrl) {
+            [900, 1800].forEach((ms) =>
+                setTimeout(() => safe(() => props("jump", "jumpToMessage").jumpToMessage({ channelId, messageId, flash: true, jumpType: "ANIMATED" })), ms),
+            );
+            return "openUrl";
+        }
         const opened =
             (safe(() => {
                 const pr = Linking.openURL(`discord://-${path}`);
@@ -200,6 +211,9 @@
             if (!found) {
                 status.lastJump = `no message found for #${channel.name} (${status.lastSearch || "no search"}) -> opened channel`;
                 const ok = safe(() => {
+                    props("openUrl", "openUrl").openUrl(`https://discord.com/channels/${guildId}/${channel.id}`);
+                    return true;
+                }, false) || safe(() => {
                     Linking.openURL(`discord://-/channels/${guildId}/${channel.id}`);
                     return true;
                 }, false) || safe(() => {
