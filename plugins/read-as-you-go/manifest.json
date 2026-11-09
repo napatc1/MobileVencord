@@ -1,0 +1,16 @@
+{
+  "name": "Read As You Go",
+  "description": "Marks messages as read up to what you've actually scrolled past (step 1: listens to the chat to learn how).",
+  "authors": [
+    {
+      "name": "napatc1",
+      "id": "0"
+    }
+  ],
+  "main": "index.js?v=995f99ad10eb",
+  "hash": "995f99ad10ebcab009421c7435a17015fe45bcdfd879e22ed533addfe212b50e",
+  "vendetta": {
+    "icon": "ic_message_check"
+  },
+  "version": "0.1.0"
+}
