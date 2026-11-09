@@ -10,7 +10,7 @@
     const { View, Text, Pressable, Linking } = ReactNative;
     const h = React.createElement;
 
-    const VERSION = "1.1.0";
+    const VERSION = "1.1.1";
     const COLORS = { text: "#E3E8F4", sub: "#8592AD", muted: "#576175", box: "#1C1F26", border: "#2B303B", red: "#CA6E8C", ring: "#16181D" };
     const CHANNEL_LIST = "modules/channel_list_v2/native/RedesignChannelList.tsx";
 
@@ -163,37 +163,54 @@
             });
     }
 
+    // Open the chat AT the message. jumpToMessage only scrolls a chat that is already open (from the
+    // channel list it silently does nothing), so first open the chat with Discord's own message link,
+    // then jumpToMessage once it's open to scroll + highlight.
     function navigate(guildId, channelId, messageId) {
-        const tries = [
-            ["jumpToMessage", () => props("jump", "jumpToMessage").jumpToMessage({ channelId, messageId, flash: true })],
-            ["transitionTo", () => props("trans", "transitionTo").transitionTo(`/channels/${guildId}/${channelId}/${messageId}`)],
-            ["deep link", () => Linking.openURL(`discord://-/channels/${guildId}/${channelId}/${messageId}`)],
-        ];
-        for (const [name, fn] of tries) {
-            try {
-                fn();
-                return name;
-            } catch (e) {}
-        }
-        return null;
+        const path = `/channels/${guildId}/${channelId}/${messageId}`;
+        // Discord's own deep link first: it is what the app itself uses for message links on phones.
+        // transitionTo is only a fallback if the link is refused (it may exist but do nothing on mobile).
+        const viaRouter = () =>
+            safe(() => {
+                props("trans", "transitionTo").transitionTo(path);
+                return true;
+            }, false);
+        const opened =
+            (safe(() => {
+                const pr = Linking.openURL(`discord://-${path}`);
+                if (pr && typeof pr.catch === "function")
+                    pr.catch(() => {
+                        status.lastJump += " (link refused, used router)";
+                        viaRouter();
+                    });
+                return true;
+            }, false) && "message link") ||
+            (viaRouter() && "transitionTo");
+        // scroll + highlight once the chat is on screen (harmless if it already is)
+        [700, 1600].forEach((ms) =>
+            setTimeout(() => safe(() => props("jump", "jumpToMessage").jumpToMessage({ channelId, messageId, flash: true })), ms),
+        );
+        return opened || (props("jump", "jumpToMessage") ? "jumpToMessage only" : null);
     }
 
     function jumpToPing(guildId, channel) {
         status.lastJump = `looking for the ping in #${channel.name}…`;
+        toast(`Ping Box: finding the ping in #${channel.name}…`);
         return findPingMessageId(guildId, channel.id).then((found) => {
             if (!found) {
                 status.lastJump = `no message found for #${channel.name} (${status.lastSearch || "no search"}) -> opened channel`;
                 const ok = safe(() => {
-                    props("trans", "transitionTo").transitionTo(`/channels/${guildId}/${channel.id}`);
+                    Linking.openURL(`discord://-/channels/${guildId}/${channel.id}`);
                     return true;
                 }, false) || safe(() => {
-                    Linking.openURL(`discord://-/channels/${guildId}/${channel.id}`);
+                    props("trans", "transitionTo").transitionTo(`/channels/${guildId}/${channel.id}`);
                     return true;
                 }, false);
                 toast(`Ping Box: couldn't find the exact ping in #${channel.name}${ok ? ", opened the channel" : ""} (${status.lastSearch || "no search"})`);
                 return;
             }
             const via = navigate(guildId, channel.id, found.id);
+            if (via) toast(`Ping Box: opening the ping in #${channel.name}`);
             status.lastJump = via ? `#${channel.name}: ${found.how} -> ${via}` : `#${channel.name}: found (${found.how}) but no way to open it`;
             if (!via) toast("Ping Box: found the ping but couldn't open it");
         });
