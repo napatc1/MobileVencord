@@ -10,7 +10,7 @@
     const { React, ReactNative, FluxDispatcher } = metro.common;
     const { View, Text, Image, ScrollView, Switch, Pressable, Modal, Linking } = ReactNative;
 
-    const VERSION = "1.9.1";
+    const VERSION = "1.9.2";
     const status = { autoCollapse: "not started", hideIcons: "not started", column: "not started", nav: "unused" };
     const stats = { renders: 0, previewPatched: 0, hostAttached: 0, hostMounted: false, attachMode: "none" };
     const unpatches = [];
@@ -1031,8 +1031,47 @@
         );
     }
 
+    // ── self-repair after a partial update ─────────────────────────────────
+    // Render's CDN can briefly serve a new manifest with old code; Kettu then stores the old code under
+    // the new hash and a normal Refetch never downloads it again. If our code's VERSION doesn't match
+    // the manifest's "version", force Kettu to re-download the code and restart us (max 3 tries).
+    function selfRepair(NAME) {
+        const want = safe(() => vendetta.plugin.manifest.version, null);
+        if (!want || want === VERSION) {
+            storage.__repairTries = 0;
+            return;
+        }
+        const tries = (storage.__repairTries || 0) + 1;
+        storage.__repairTries = tries;
+        if (tries > 3) {
+            toast(`${NAME}: couldn't finish updating to ${want}. Remove it and install it again from the same link.`);
+            return;
+        }
+        toast(`${NAME}: finishing update to ${want}…`);
+        setTimeout(() => {
+            const P = safe(() => vendetta.plugins, null);
+            const id = safe(() => vendetta.plugin.id, null);
+            if (!P || !id) return;
+            safe(() => {
+                P.plugins[id].manifest.hash = "repair-" + Date.now();
+            });
+            Promise.resolve(safe(() => P.fetchPlugin(id), null))
+                .then(() => {
+                    const js = safe(() => P.plugins[id].js, "") || "";
+                    if (js.indexOf(`const VERSION = "${want}"`) === -1) {
+                        toast(`${NAME}: the update isn't ready yet, will try again next time Discord starts`);
+                        return;
+                    }
+                    P.stopPlugin(id, false);
+                    P.startPlugin(id);
+                })
+                .catch(() => {});
+        }, 8000);
+    }
+
     return {
         onLoad() {
+            safe(() => selfRepair("BetterFolders"));
             if (storage.hideIcons === undefined) storage.hideIcons = true;
             if (storage.autoCollapse === undefined) storage.autoCollapse = true;
             if (storage.column === undefined) storage.column = true;

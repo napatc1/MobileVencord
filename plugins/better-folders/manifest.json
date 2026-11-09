@@ -7,9 +7,10 @@
       "id": "843448897737064448"
     }
   ],
-  "main": "index.js?v=3c479a756b68",
-  "hash": "3c479a756b68c50269ee588a3fcd9cc2865baec44ccdf83009af1406c5cd44fa",
+  "main": "index.js?v=81c9b6cc29e6",
+  "hash": "81c9b6cc29e616ac44f6e7b90ad3af7f76db97116bfd9693a65643fcb47e33a2",
   "vendetta": {
     "icon": "img_guild_folder"
-  }
+  },
+  "version": "1.9.2"
 }
