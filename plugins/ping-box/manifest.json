@@ -1,0 +1,15 @@
+{
+  "name": "Ping Box",
+  "description": "Channels where you were pinged, at the top of every server's channel list. Tap one to jump straight to the ping.",
+  "authors": [
+    {
+      "name": "napatc1",
+      "id": "0"
+    }
+  ],
+  "main": "index.js?v=88afb596afdb",
+  "hash": "88afb596afdbd99d0df96abf0750c0342b1562c097926e97dc6fa9dcef4b0fac",
+  "vendetta": {
+    "icon": "ic_at_sign"
+  }
+}
