@@ -10,7 +10,7 @@
     const { React, ReactNative, FluxDispatcher } = metro.common;
     const { View, Text, Image, ScrollView, Switch, Pressable, Modal, Linking } = ReactNative;
 
-    const VERSION = "1.10.0";
+    const VERSION = "1.10.1";
     const status = { autoCollapse: "not started", hideIcons: "not started", column: "not started", nav: "unused" };
     const stats = { renders: 0, previewPatched: 0, hostAttached: 0, hostMounted: false, attachMode: "none" };
     const unpatches = [];
@@ -516,12 +516,18 @@
             .filter((c) => safe(() => RS.hasUnread(c.id), false))
             .map((c) => ({ channelId: c.id, messageId: safe(() => RS.lastMessageId(c.id), null), readStateType: 0 }))
             .filter((x) => x.messageId);
+        if (!list.length) return "nothing unread";
+        // Discord's own BULK_ACK action - the same call the working "Read All" plugin uses on mobile
+        if (safe(() => {
+            FluxDispatcher.dispatch({ type: "BULK_ACK", context: "APP", channels: list });
+            return true;
+        }, false)) return `BULK_ACK ${list.length}`;
         const B = byProps("bulkAck", "bulkAck");
-        if (B && list.length && safe(() => {
+        if (B && safe(() => {
             B.bulkAck(list);
             return true;
         }, false)) return `bulkAck ${list.length}`;
-        return list.length ? null : "nothing unread";
+        return null;
     }
 
     function ServerMenuSheet({ guildId }) {
