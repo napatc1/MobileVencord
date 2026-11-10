@@ -10,11 +10,16 @@ import ErrorBoundary from "@components/ErrorBoundary";
 import definePlugin, { OptionType } from "@utils/types";
 import { RenderModalProps } from "@vencord/discord-types";
 import {
-    ChannelStore, GuildChannelStore, GuildMemberStore, Modal, NavigationRouter, openModal, ReadStateStore,
+    ChannelStore, createRoot, GuildChannelStore, GuildMemberStore, Modal, NavigationRouter, openModal, ReadStateStore,
     RestAPI, SelectedGuildStore, showToast, UserStore, useStateFromStores
 } from "@webpack/common";
 
 const settings = definePluginSettings({
+    showTopBox: {
+        type: OptionType.BOOLEAN,
+        description: "Show the pinged channels in a box at the top of the channel list",
+        default: true,
+    },
     showButtonWithoutPings: {
         type: OptionType.BOOLEAN,
         description: "Keep the @ button in the message bar even when there are no pings in this server",
@@ -167,6 +172,62 @@ function PingBoxModal({ modalProps }: { modalProps: RenderModalProps; }) {
     );
 }
 
+function PingTopBox() {
+    const { guildId, pings } = useGuildPings();
+    if (!settings.store.showTopBox || !guildId || !pings.length) return null;
+    return (
+        <div style={{ margin: "8px 8px 4px", padding: "6px 0", borderRadius: 10, background: "var(--background-secondary-alt, var(--background-tertiary))", border: "1px solid var(--background-modifier-accent)" }}>
+            <div style={{ color: "var(--text-muted)", fontSize: 11, fontWeight: 800, letterSpacing: ".04em", padding: "0 10px 4px" }}>PINGS</div>
+            {pings.slice(0, 8).map(ch => (
+                <div
+                    key={ch.id}
+                    role="button"
+                    tabIndex={0}
+                    title={`Jump to the ping in #${ch.name}`}
+                    onClick={() => jumpToPing(guildId, ch, () => { })}
+                    className="vc-pingbox-row"
+                    style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 10px", cursor: "pointer", borderRadius: 6 }}
+                    onMouseEnter={e => (e.currentTarget.style.background = "var(--background-modifier-hover)")}
+                    onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+                >
+                    <span style={{ color: "var(--channel-icon, var(--text-muted))", fontSize: 16, width: 12 }}>#</span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ color: "var(--interactive-active, var(--header-primary))", fontWeight: 600, fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{ch.name}</div>
+                        {ch.category && <div style={{ color: "var(--text-muted)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{ch.category}</div>}
+                    </div>
+                    <span style={{ minWidth: 18, height: 18, padding: "0 5px", borderRadius: 9, background: "var(--status-danger)", color: "#fff", fontSize: 11, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        {ch.count > 99 ? "99+" : ch.count}
+                    </span>
+                </div>
+            ))}
+            {pings.length > 8 && <div style={{ color: "var(--text-muted)", fontSize: 11, padding: "2px 10px" }}>+{pings.length - 8} more</div>}
+        </div>
+    );
+}
+
+// Keep our own container right above the channel list. The list is found by its rows
+// (data-list-item-id="channels___…", which Discord uses for keyboard navigation) instead of class
+// names, which change with every Discord update.
+let host: HTMLDivElement | null = null;
+let root: ReturnType<typeof createRoot> | null = null;
+let observer: MutationObserver | null = null;
+let scheduled = 0;
+
+function ensureHost() {
+    scheduled = 0;
+    const row = document.querySelector('[data-list-item-id^="channels___"]');
+    const list = row?.closest("ul");
+    if (!list?.parentElement) return;
+    if (host?.isConnected && host.nextElementSibling === list) return;
+    if (!host) {
+        host = document.createElement("div");
+        host.id = "vc-pingbox-top";
+        root = createRoot(host);
+        root.render(<ErrorBoundary noop><PingTopBox /></ErrorBoundary>);
+    }
+    list.parentElement.insertBefore(host, list);
+}
+
 const PingBoxButton: ChatBarButtonFactory = ({ isMainChat }) => {
     const { pings } = useGuildPings();
     if (!isMainChat) return null;
@@ -191,11 +252,30 @@ const PingBoxButton: ChatBarButtonFactory = ({ isMainChat }) => {
 
 export default definePlugin({
     name: "PingBox",
-    description: "An @ button in the message bar listing the channels in this server where you were pinged. Click one to jump straight to the ping, not the newest message.",
+    description: "Pinged channels at the top of the channel list (and an @ button in the message bar). Click one to jump straight to the ping, not the newest message.",
     authors: [{ name: "napatc1", id: 0n }],
     settings,
     chatBarButton: {
         icon: AtIcon,
         render: PingBoxButton,
+    },
+
+    start() {
+        observer = new MutationObserver(() => {
+            if (!scheduled) scheduled = requestAnimationFrame(ensureHost);
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+        ensureHost();
+    },
+
+    stop() {
+        observer?.disconnect();
+        observer = null;
+        if (scheduled) cancelAnimationFrame(scheduled);
+        scheduled = 0;
+        root?.unmount();
+        root = null;
+        host?.remove();
+        host = null;
     },
 });
