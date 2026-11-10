@@ -8,10 +8,10 @@
     const { metro, patcher, plugin } = vendetta;
     const { storage } = plugin;
     const { React, ReactNative } = metro.common;
-    const { View, Text, ScrollView, Pressable, StyleSheet } = ReactNative;
+    const { View, Text, ScrollView, Pressable, StyleSheet, ImageBackground, TextInput } = ReactNative;
     const h = React.createElement;
 
-    const VERSION = "0.5.1";
+    const VERSION = "0.6.0";
     // every module that can draw part of the main screens (server bar, channel list, DMs, chat, tabs)
     const RX = /(main_tabs_v2\/native|channel_list_v2\/native|guilds_bar\/native|guild_sidebar\/native|home\/native|home_drawer\/native|chat\/native|chat_input\/native|you_tab|user_profile\/native\/UserPanel|notifications\/native|private_channels)/i;
 
@@ -137,6 +137,34 @@
                 { style: { color: "#8592AD", fontSize: 14, padding: 16, lineHeight: 20 } },
                 "Midnight look: rounded chat, message box, channel list and DMs list. The channel list updates when you switch servers; the DMs list after Discord restarts. Each part has a switch below if anything looks wrong.",
             ),
+            h(Row, { label: "Glass style (like Glassify)", value: isGlass(), onChange: (v) => { storage.style = v ? "glass" : "midnight"; force(); } }),
+            isGlass()
+                ? h(
+                      View,
+                      { style: { paddingHorizontal: 16, paddingBottom: 8 } },
+                      h(Text, { style: { color: "#8592AD", fontSize: 13, marginBottom: 6 } }, "Wallpaper link (leave empty for the default aurora):"),
+                      TextInput
+                          ? h(TextInput, {
+                                defaultValue: typeof storage.glassImage === "string" ? storage.glassImage : "",
+                                placeholder: GLASS_DEFAULT_IMAGE,
+                                placeholderTextColor: "#576175",
+                                autoCapitalize: "none",
+                                autoCorrect: false,
+                                onChangeText: (t) => { storage.glassImage = t.trim(); },
+                                style: { color: "#E3E8F4", fontSize: 13, padding: 10, borderRadius: 10, backgroundColor: "#1C1F26", borderWidth: 1, borderColor: "#2B303B" },
+                            })
+                          : null,
+                      h(Text, { style: { color: "#8592AD", fontSize: 13, marginTop: 12 } }, `Panel darkness: ${glassAlpha()}%   ·   Wallpaper blur: ${glassBlur()}`),
+                      h(View, { style: { flexDirection: "row", marginTop: 6 } },
+                          [["Darker", () => { storage.glassAlpha = Math.min(90, glassAlpha() + 10); force(); }],
+                           ["Clearer", () => { storage.glassAlpha = Math.max(10, glassAlpha() - 10); force(); }],
+                           ["More blur", () => { storage.glassBlur = Math.min(40, glassBlur() + 10); force(); }],
+                           ["Less blur", () => { storage.glassBlur = Math.max(0, glassBlur() - 10); force(); }]].map(([t, f]) =>
+                              h(Pressable, { key: t, onPress: f, style: { paddingHorizontal: 10, paddingVertical: 8, marginRight: 6, borderRadius: 8, backgroundColor: "#2B303B" } },
+                                  h(Text, { style: { color: "#E3E8F4", fontSize: 12 } }, t)))),
+                      h(Text, { style: { color: "#576175", fontSize: 12, marginTop: 8 } }, "For the full look, also use the Midnight Glass theme. Changes show when each screen redraws."),
+                  )
+                : null,
             h(Row, { label: "Rounded chat panel", value: on("roundChat"), onChange: (v) => { storage.roundChat = v; force(); } }),
             h(Row, { label: "Rounded message box", value: on("roundInput"), onChange: (v) => { storage.roundInput = v; force(); } }),
             h(Row, { label: "Rounded channel list", value: on("roundChannels"), onChange: (v) => { storage.roundChannels = v; force(); } }),
@@ -192,21 +220,37 @@
     }
 
     // rounded floating panel: frame-coloured padding around a rounded, bordered, clipped box
-    const panel = (child, extra) =>
-        h(
+    // ── Glass style (Glassify-like): blurred wallpaper behind see-through panels ──
+    const GLASS_DEFAULT_IMAGE = "https://mobilevencord.onrender.com/images/glass-aurora.jpg";
+    const isGlass = () => storage.style === "glass";
+    const glassImage = () => (typeof storage.glassImage === "string" && /^https?:\/\//.test(storage.glassImage) ? storage.glassImage : GLASS_DEFAULT_IMAGE);
+    const glassBlur = () => (typeof storage.glassBlur === "number" ? storage.glassBlur : 0);
+    const glassAlpha = () => (typeof storage.glassAlpha === "number" ? storage.glassAlpha : 55); // % panel darkness
+    const alphaHex = (pct) => Math.round(Math.max(0, Math.min(100, pct)) * 2.55).toString(16).padStart(2, "0").toUpperCase();
+    const GLASS = {
+        panel: () => "#0E0F16" + alphaHex(glassAlpha()),
+        box: () => "#0E0F16" + alphaHex(Math.min(100, glassAlpha() + 15)),
+        border: "#FFFFFF24",
+    };
+
+    const panel = (child, extra) => {
+        const glass = isGlass();
+        const outerStyle = [{ flex: 1, backgroundColor: glass ? "#0B0C12" : MID.frame, paddingHorizontal: MID.gap, paddingBottom: MID.gap, paddingTop: 2 }, extra && extra.outer];
+        const inner = h(
             View,
-            { style: [{ flex: 1, backgroundColor: MID.frame, paddingHorizontal: MID.gap, paddingBottom: MID.gap, paddingTop: 2 }, extra && extra.outer] },
-            h(
-                View,
-                {
-                    style: [{
-                        flex: 1, borderRadius: MID.radius, overflow: "hidden", backgroundColor: MID.panel,
-                        borderWidth: 1, borderColor: MID.border,
-                    }, extra && extra.inner],
-                },
-                child,
-            ),
+            {
+                style: [{
+                    flex: 1, borderRadius: MID.radius, overflow: "hidden",
+                    backgroundColor: glass ? GLASS.panel() : MID.panel,
+                    borderWidth: 1, borderColor: glass ? GLASS.border : MID.border,
+                }, extra && extra.inner],
+            },
+            child,
         );
+        if (glass && ImageBackground)
+            return h(ImageBackground, { source: { uri: glassImage() }, blurRadius: glassBlur(), resizeMode: "cover", style: outerStyle }, inner);
+        return h(View, { style: outerStyle }, inner);
+    };
 
     function hookChat() {
         if (lookStatus.chat.startsWith("ok")) return true;
@@ -232,14 +276,16 @@
             lookStatus.inputRenders = (lookStatus.inputRenders || 0) + 1;
             safe(() => {
                 if (!lookDiag.inputRoot) lookDiag.inputRoot = describeRoot(res);
-                if (!on("roundInput") || !res || !res.props) return;
-                res.props.style = [res.props.style, {
+            });
+            if (!on("roundInput") || !res || !res.props) return res;
+            // copy instead of editing Discord's element in place (props can be read-only)
+            return safe(() => React.cloneElement(res, {
+                style: [res.props.style, {
                     // no overflow:hidden here - the chat box can contain reply bars and suggestion pop-ups
                     marginHorizontal: MID.gap, marginBottom: 4, borderRadius: MID.radius,
-                    backgroundColor: MID.frame, borderWidth: 1, borderColor: MID.border,
-                }];
-            });
-            return res;
+                    backgroundColor: isGlass() ? GLASS.box() : MID.frame, borderWidth: 1, borderColor: isGlass() ? GLASS.border : MID.border,
+                }],
+            }), res);
         };
         let un = null;
         if (comp.type && typeof comp.type.render === "function") un = patcher.after("render", comp.type, cb);
@@ -315,7 +361,9 @@
         const cb = (args, res) => {
             lookStatus.dmsRenders = (lookStatus.dmsRenders || 0) + 1;
             if (!on("roundDMs") || !res) return res;
-            return panel(res, { outer: { paddingTop: 0 } });
+            // glass: the DMs list paints its own solid background (#16181D, seen in your report); clear it
+            const content = isGlass() && res.props ? safe(() => React.cloneElement(res, { style: [res.props.style, { backgroundColor: "transparent" }] }), res) : res;
+            return panel(content, { outer: { paddingTop: 0 } });
         };
         let un = null;
         if (comp.type && typeof comp.type.render === "function") un = patcher.after("render", comp.type, cb);
@@ -327,7 +375,23 @@
         return true;
     }
 
+    function hookChatBackground() {
+        if (lookStatus.chatBg === "ok") return true;
+        const exp = exportsByPath("modules/chat/native/Chat.ios.tsx");
+        const comp = exp && exp.default;
+        if (!comp || typeof comp.render !== "function") return (lookStatus.chatBg = "waiting"), false;
+        lookUnpatches.push(
+            patcher.after("render", comp, (args, res) => {
+                if (!isGlass() || !on("roundChat") || !res || !res.props) return res;
+                return safe(() => React.cloneElement(res, { style: [res.props.style, { backgroundColor: "transparent" }] }), res);
+            }),
+        );
+        lookStatus.chatBg = "ok";
+        return true;
+    }
+
     function applyLook() {
+        safe(hookChatBackground);
         safe(hookChat);
         safe(hookInput);
         safe(hookLayout);
