@@ -1,0 +1,16 @@
+{
+  "name": "No Suggested",
+  "description": "Hides the Suggested channels section in servers (only on your screen).",
+  "authors": [
+    {
+      "name": "napatc1",
+      "id": "0"
+    }
+  ],
+  "main": "index.js?v=3d94d8605171",
+  "hash": "3d94d8605171de46a2d8ea803e2a7758294effabf6efdcdc9e9df20187417471",
+  "vendetta": {
+    "icon": "ic_channel_browse"
+  },
+  "version": "0.1.0"
+}
