@@ -1,0 +1,16 @@
+{
+  "name": "Ping Feed",
+  "description": "Pings from every server at the top of the channel list: server icon, count and channel. Tap to jump straight to the ping.",
+  "authors": [
+    {
+      "name": "napatc1",
+      "id": "0"
+    }
+  ],
+  "main": "index.js?v=7d73354d9b0a",
+  "hash": "7d73354d9b0a51ccd8c6126702ee8613b7e9f21f5d856e9f15981619c8b90ea6",
+  "vendetta": {
+    "icon": "ic_at_sign"
+  },
+  "version": "0.1.0"
+}
