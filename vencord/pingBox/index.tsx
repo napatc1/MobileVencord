@@ -10,7 +10,7 @@ import ErrorBoundary from "@components/ErrorBoundary";
 import definePlugin, { OptionType } from "@utils/types";
 import { RenderModalProps } from "@vencord/discord-types";
 import {
-    ChannelStore, createRoot, GuildChannelStore, GuildMemberStore, Modal, NavigationRouter, openModal, ReadStateStore,
+    ChannelStore, createRoot, FluxDispatcher, MessageStore, GuildChannelStore, GuildMemberStore, Modal, NavigationRouter, openModal, ReadStateStore,
     RestAPI, SelectedGuildStore, showToast, UserStore, useStateFromStores
 } from "@webpack/common";
 
@@ -78,44 +78,117 @@ function pingsMe(m: SearchMessage, myId: string, myRoles: string[]) {
         || (m.mention_roles ?? []).some(r => myRoles.includes(r));
 }
 
-/** Oldest unread message that pings you (name, @everyone/@here or one of your roles), then fallbacks. */
-async function findPing(guildId: string, channelId: string): Promise<{ id: string; how: string; } | null> {
+const newerThan = (a: string, b?: string | null) => !b || BigInt(a) > BigInt(b);
+const olderOf = (a: string | null, b: string | null) => (!a ? b : !b ? a : newerThan(a, b) ? b : a);
+
+// ── fast paths, no network: pings recorded as they arrive + messages already loaded ──
+const livePings = new Map<string, string[]>();
+function onMessageCreate(e: any) {
+    try {
+        const m = e?.message;
+        const channelId = e?.channelId ?? m?.channel_id;
+        const guildId = e?.guildId ?? m?.guild_id;
+        const myId = UserStore.getCurrentUser()?.id;
+        if (!m?.id || !guildId || e.optimistic || m.author?.id === myId) return;
+        if (!pingsMe(m, myId, GuildMemberStore.getMember(guildId, myId)?.roles ?? [])) return;
+        const list = livePings.get(channelId) ?? [];
+        if (!list.includes(m.id)) list.push(m.id);
+        if (list.length > 50) list.shift();
+        livePings.set(channelId, list);
+    } catch { }
+}
+
+function knownPing(guildId: string, channelId: string, ack: string | null): string | null {
     const myId = UserStore.getCurrentUser()?.id;
     const myRoles = GuildMemberStore.getMember(guildId, myId)?.roles ?? [];
-    const lastRead = ReadStateStore.ackMessageId(channelId);
+    let best: string | null = null;
+    for (const id of livePings.get(channelId) ?? []) if (newerThan(id, ack)) best = olderOf(best, id);
+    const loaded: any[] = (MessageStore.getMessages(channelId) as any)?._array ?? [];
+    for (const m of loaded) {
+        if (m?.id && newerThan(m.id, ack) && m.author?.id !== myId && pingsMe(m, myId, myRoles)) best = olderOf(best, m.id);
+    }
+    return best;
+}
 
-    try {
-        if (lastRead) {
-            for (let offset = 0; offset < 100; offset += 25) {
-                const page = await search(guildId, { channel_id: channelId, min_id: lastRead, sort_by: "timestamp", sort_order: "asc", offset });
+// ── searching: all at once, and remembered so a second click is instant ──
+const found = new Map<string, { ack: string | null; id: string; }>();
+const inFlight = new Map<string, Promise<{ id: string; how: string; } | null>>();
+
+/** Oldest unread message that pings you (name, @everyone/@here or one of your roles), then fallbacks. */
+function findPing(guildId: string, channelId: string): Promise<{ id: string; how: string; } | null> {
+    const lastRead = ReadStateStore.ackMessageId(channelId);
+    const quick = knownPing(guildId, channelId, lastRead);
+    if (quick) return Promise.resolve({ id: quick, how: "already loaded" });
+    const f = found.get(channelId);
+    if (f && f.ack === lastRead) return Promise.resolve({ id: f.id, how: "found earlier" });
+    const running = inFlight.get(channelId);
+    if (running) return running;
+
+    const p = (async () => {
+        const myId = UserStore.getCurrentUser()?.id;
+        const myRoles = GuildMemberStore.getMember(guildId, myId)?.roles ?? [];
+        const quiet = (q: Promise<SearchMessage[]>) => q.catch(e => (console.warn("[PingBox] search failed", e), [] as SearchMessage[]));
+        const base: Record<string, string | number | boolean> = { channel_id: channelId, sort_by: "timestamp", sort_order: "asc" };
+        if (lastRead) base.min_id = lastRead;
+        // one round trip instead of up to six one after another
+        const [unread, named, everyone] = await Promise.all([
+            quiet(search(guildId, base)),
+            quiet(search(guildId, { ...base, mentions: myId })),
+            quiet(search(guildId, { ...base, mention_everyone: true })),
+        ]);
+        let best: string | null = null;
+        for (const m of unread) if (pingsMe(m, myId, myRoles)) best = olderOf(best, m.id);
+        if (named[0]) best = olderOf(best, named[0].id);
+        if (everyone[0]) best = olderOf(best, everyone[0].id);
+        if (best) return { id: best, how: "oldest unread ping" };
+        // a role ping further down: keep paging the unread messages
+        if (lastRead && unread.length >= 25) {
+            for (let offset = 25; offset < 100; offset += 25) {
+                const page = await quiet(search(guildId, { ...base, offset }));
                 const hit = page.find(m => pingsMe(m, myId, myRoles));
                 if (hit) return { id: hit.id, how: "oldest unread ping" };
                 if (page.length < 25) break;
             }
         }
-        const named = await search(guildId, { channel_id: channelId, mentions: myId });
-        if (named[0]) return { id: named[0].id, how: "newest ping" };
-        const everyone = await search(guildId, { channel_id: channelId, mention_everyone: true });
-        if (everyone[0]) return { id: everyone[0].id, how: "newest @everyone" };
-    } catch (e) {
-        console.warn("[PingBox] search failed", e);
-    }
-    const oldestUnread = ReadStateStore.getOldestUnreadMessageId(channelId);
-    if (oldestUnread) return { id: oldestUnread, how: "first unread" };
-    return lastRead ? { id: lastRead, how: "where you stopped reading" } : null;
+        const newest = await quiet(search(guildId, { channel_id: channelId, mentions: myId }));
+        if (newest[0]) return { id: newest[0].id, how: "newest ping" };
+        const oldestUnread = ReadStateStore.getOldestUnreadMessageId(channelId);
+        if (oldestUnread) return { id: oldestUnread, how: "first unread" };
+        return lastRead ? { id: lastRead, how: "where you stopped reading" } : null;
+    })().then(r => {
+        if (r) found.set(channelId, { ack: lastRead, id: r.id });
+        inFlight.delete(channelId);
+        return r;
+    }, () => (inFlight.delete(channelId), null));
+    inFlight.set(channelId, p);
+    return p;
+}
+
+/** Look up the top few pings in the background (spaced out: Discord rate-limits search). */
+const prefetched = new Map<string, string | null>();
+function prefetch(guildId: string, pings: PingedChannel[]) {
+    pings.slice(0, 3).forEach((ch, i) => {
+        const ack = ReadStateStore.ackMessageId(ch.id);
+        if (prefetched.has(ch.id) && prefetched.get(ch.id) === ack) return;
+        prefetched.set(ch.id, ack);
+        if (knownPing(guildId, ch.id, ack)) return;
+        setTimeout(() => void findPing(guildId, ch.id), 300 + i * 800);
+    });
 }
 
 async function jumpToPing(guildId: string, ch: PingedChannel, close: () => void) {
-    showToast({ text: `Finding the ping in #${ch.name}…`, variant: "secondary" });
-    const found = await findPing(guildId, ch.id);
+    const ack = ReadStateStore.ackMessageId(ch.id);
+    const ready = knownPing(guildId, ch.id, ack) || found.get(ch.id)?.ack === ack;
+    if (!ready) showToast({ text: `Finding the ping in #${ch.name}…`, variant: "secondary" });
+    const hit = await findPing(guildId, ch.id);
     close();
-    if (!found) {
+    if (!hit) {
         showToast({ text: `Couldn't find the exact ping in #${ch.name} - opened the channel`, variant: "critical" });
         NavigationRouter.transitionTo(`/channels/${guildId}/${ch.id}`);
         return;
     }
     // On desktop, a message URL opens the chat at that message and highlights it
-    NavigationRouter.transitionTo(`/channels/${guildId}/${ch.id}/${found.id}`);
+    NavigationRouter.transitionTo(`/channels/${guildId}/${ch.id}/${hit.id}`);
 }
 
 // ── UI ────────────────────────────────────────────────────────────────────
@@ -175,6 +248,7 @@ function PingBoxModal({ modalProps }: { modalProps: RenderModalProps; }) {
 function PingTopBox() {
     const { guildId, pings } = useGuildPings();
     if (!settings.store.showTopBox || !guildId || !pings.length) return null;
+    prefetch(guildId, pings);
     return (
         <div style={{ margin: "8px 8px 4px", padding: "6px 0", borderRadius: 10, background: "var(--background-secondary-alt, var(--background-tertiary))", border: "1px solid var(--background-modifier-accent)" }}>
             <div style={{ color: "var(--text-muted)", fontSize: 11, fontWeight: 800, letterSpacing: ".04em", padding: "0 10px 4px" }}>PINGS</div>
@@ -261,6 +335,7 @@ export default definePlugin({
     },
 
     start() {
+        FluxDispatcher.subscribe("MESSAGE_CREATE", onMessageCreate);
         observer = new MutationObserver(() => {
             if (!scheduled) scheduled = requestAnimationFrame(ensureHost);
         });
@@ -269,6 +344,10 @@ export default definePlugin({
     },
 
     stop() {
+        FluxDispatcher.unsubscribe("MESSAGE_CREATE", onMessageCreate);
+        livePings.clear();
+        found.clear();
+        prefetched.clear();
         observer?.disconnect();
         observer = null;
         if (scheduled) cancelAnimationFrame(scheduled);

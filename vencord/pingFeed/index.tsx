@@ -10,7 +10,7 @@ import ErrorBoundary from "@components/ErrorBoundary";
 import definePlugin, { OptionType } from "@utils/types";
 import {
     ActiveJoinedThreadsStore, ChannelStore, createRoot, FluxDispatcher, GuildChannelStore, GuildMemberStore,
-    GuildReadStateStore, GuildStore, IconUtils, NavigationRouter, React, ReadStateStore, RestAPI, showToast, Tooltip,
+    GuildReadStateStore, GuildStore, IconUtils, MessageStore, NavigationRouter, React, ReadStateStore, RestAPI, showToast, Tooltip,
     UserStore, useStateFromStores
 } from "@webpack/common";
 
@@ -126,27 +126,31 @@ async function search(guildId: string, query: Record<string, string | number | b
     return groups.map(g => (Array.isArray(g) ? g.find(m => m?.hit) ?? g[0] : g)).filter(Boolean);
 }
 
+const older = (a: string | null, b: string | null) => (!a ? b : !b ? a : BigInt(a) < BigInt(b) ? a : b);
+
 async function findPing(guildId: string, channelId: string): Promise<string | null> {
     const lastRead = ReadStateStore.ackMessageId(channelId);
-    // a ping we saw arrive (oldest one you haven't read yet)
-    const live = livePings.get(channelId)?.ids.find(id => !lastRead || BigInt(id) > BigInt(lastRead));
-    if (live) return live;
-    try {
-        if (lastRead) {
-            for (let offset = 0; offset < 100; offset += 25) {
-                const page = await search(guildId, { channel_id: channelId, min_id: lastRead, sort_by: "timestamp", sort_order: "asc", offset });
-                const hit = page.find(m => pingsMe(m, guildId));
-                if (hit) return hit.id;
-                if (page.length < 25) break;
-            }
-        }
-        const me = UserStore.getCurrentUser()?.id;
-        const named = await search(guildId, { channel_id: channelId, mentions: me });
-        if (named[0]) return named[0].id;
-    } catch (e) {
-        console.warn("[PingFeed] search failed", e);
-    }
-    return ReadStateStore.getOldestUnreadMessageId(channelId) ?? lastRead ?? null;
+    const after = (id: string) => !lastRead || BigInt(id) > BigInt(lastRead);
+    // no network: pings we saw arrive, or messages Discord already has loaded
+    let best: string | null = null;
+    for (const id of livePings.get(channelId)?.ids ?? []) if (after(id)) best = older(best, id);
+    for (const m of ((MessageStore.getMessages(channelId) as any)?._array ?? []) as any[])
+        if (m?.id && after(m.id) && pingsMe(m, guildId)) best = older(best, m.id);
+    if (best) return best;
+    // otherwise ask Discord's search, all at once (one round trip)
+    const me = UserStore.getCurrentUser()?.id;
+    const quiet = (q: Promise<any[]>) => q.catch(() => [] as any[]);
+    const base: Record<string, string | number | boolean> = { channel_id: channelId, sort_by: "timestamp", sort_order: "asc" };
+    if (lastRead) base.min_id = lastRead;
+    const [unread, named, everyone] = await Promise.all([
+        quiet(search(guildId, base)),
+        quiet(search(guildId, { ...base, mentions: me })),
+        quiet(search(guildId, { ...base, mention_everyone: true })),
+    ]);
+    for (const m of unread) if (pingsMe(m, guildId)) best = older(best, m.id);
+    if (named[0]) best = older(best, named[0].id);
+    if (everyone[0]) best = older(best, everyone[0].id);
+    return best ?? ReadStateStore.getOldestUnreadMessageId(channelId) ?? lastRead ?? null;
 }
 
 async function jump(p: Ping) {

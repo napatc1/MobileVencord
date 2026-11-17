@@ -10,7 +10,7 @@
     const { View, Text, Pressable, Linking } = ReactNative;
     const h = React.createElement;
 
-    const VERSION = "1.2.0";
+    const VERSION = "1.3.0";
     const COLORS = { text: "#E3E8F4", sub: "#8592AD", muted: "#576175", box: "#1C1F26", border: "#2B303B", red: "#CA6E8C", ring: "#16181D" };
     const CHANNEL_LIST = "modules/channel_list_v2/native/RedesignChannelList.tsx";
 
@@ -115,52 +115,124 @@
             (m.mentions || []).some((u) => (u && (u.id || u)) === uid) ||
             (m.mention_roles || []).some((r) => roles.indexOf(r) !== -1));
 
-    // returns a Promise of { id, how } (or a fallback) - never rejects
-    function findPingMessageId(guildId, channelId) {
-        const notes = [];
-        // a) mentions Discord already has in memory
-        const recent = safe(() => {
-            const rm = store("RecentMentionsStore");
-            const list = (rm.getMentions && rm.getMentions()) || [];
-            const hit = list.find((m) => (m.channel_id || m.channelId) === channelId);
-            return hit && hit.id;
-        }, null);
-        if (recent) return Promise.resolve({ id: recent, how: "recent mentions" });
+    const newerThan = (a, b) => !b || safe(() => BigInt(a) > BigInt(b), String(a) > String(b));
+    const olderOf = (a, b) => (!a ? b : !b ? a : newerThan(a, b) ? b : a);
 
+    // ── fast paths: pings we already know about, no network needed ─────────
+    // a) pings recorded live as they arrive (exact ids)
+    const livePings = {}; // channelId -> [message ids]
+    function onMessageCreate(e) {
+        safe(() => {
+            const m = e && e.message;
+            const channelId = (e && e.channelId) || (m && m.channel_id);
+            const guildId = (e && e.guildId) || (m && m.guild_id);
+            if (!m || !m.id || !channelId || !guildId || e.optimistic) return;
+            const uid = me();
+            if (!uid || (m.author && m.author.id === uid)) return;
+            if (!pingsMe(m, uid, myRoleIds(guildId))) return;
+            const list = livePings[channelId] || (livePings[channelId] = []);
+            if (list.indexOf(m.id) === -1) list.push(m.id);
+            if (list.length > 50) list.shift();
+        });
+    }
+    // b) messages Discord already has loaded for the channel
+    function cachedPing(guildId, channelId, ack) {
         const uid = me();
         const roles = myRoleIds(guildId);
+        const live = (livePings[channelId] || []).filter((id) => newerThan(id, ack));
+        let best = live.length ? live.reduce(olderOf) : null;
+        const msgs = safe(() => {
+            const cm = store("MessageStore").getMessages(channelId);
+            return (cm && (cm._array || (cm.toArray && cm.toArray()))) || [];
+        }, []);
+        for (const m of msgs) {
+            if (m && newerThan(m.id, ack) && (!m.author || m.author.id !== uid) && pingsMe(m, uid, roles)) best = olderOf(best, m.id);
+        }
+        // c) Discord's recent-mentions list (only ones you haven't read)
+        safe(() => {
+            const rm = store("RecentMentionsStore");
+            const list = (rm.getMentions && rm.getMentions()) || [];
+            for (const m of list) if ((m.channel_id || m.channelId) === channelId && newerThan(m.id, ack)) best = olderOf(best, m.id);
+        });
+        return best;
+    }
+
+    // ── results found ahead of time, so a tap opens the ping instantly ──────
+    const found = {}; // channelId -> { ack, result }
+    const inFlight = {}; // channelId -> Promise
+
+    // returns a Promise of { id, how } (or a fallback) - never rejects
+    function findPingMessageId(guildId, channelId) {
         const ack = lastReadId(channelId);
+        const quick = cachedPing(guildId, channelId, ack);
+        if (quick) return Promise.resolve({ id: quick, how: "already loaded" });
+        const f = found[channelId];
+        if (f && f.ack === ack && f.result) return Promise.resolve(f.result);
+        if (inFlight[channelId]) return inFlight[channelId];
+
+        const notes = [];
+        const uid = me();
+        const roles = myRoleIds(guildId);
         notes.push(ack ? "last read found" : "no last-read point");
-
-        // b) oldest unread message that pings me (by name, @everyone or one of my roles)
-        const scanUnread = (offset) => {
-            if (!ack || offset >= 100) return Promise.resolve(null);
-            return search(guildId, { channel_id: channelId, min_id: ack, sort_by: "timestamp", sort_order: "asc", offset })
-                .then(({ msgs }) => {
-                    const hit = msgs.find((m) => pingsMe(m, uid, roles));
-                    if (hit) return { id: hit.id, how: "oldest unread ping" };
-                    if (msgs.length < 25) return null; // no more pages
-                    return scanUnread(offset + 25);
-                });
-        };
-        const newest = (query, how) =>
-            search(guildId, Object.assign({ channel_id: channelId }, query)).then(({ msgs, total }) => {
-                notes.push(`${how}: ${total != null ? total : msgs.length}`);
-                return msgs[0] ? { id: msgs[0].id, how } : null;
-            });
-        const orNext = (p, next) => p.catch((e) => {
-            notes.push(`search error ${(e && (e.status || e.message)) || e}`);
-            return null;
-        }).then((r) => r || next());
-
-        return orNext(scanUnread(0), () =>
-            orNext(uid ? newest({ mentions: uid }, "newest name ping") : Promise.resolve(null), () =>
-                orNext(newest({ mention_everyone: true }, "newest @everyone"), () =>
-                    Promise.resolve(ack ? { id: ack, how: "where you stopped reading" } : null))))
+        const quiet = (p, label) => p.catch((e) => {
+            notes.push(`${label} error ${(e && (e.status || e.message)) || e}`);
+            return { msgs: [] };
+        });
+        const base = { channel_id: channelId, sort_by: "timestamp", sort_order: "asc" };
+        if (ack) base.min_id = ack;
+        // all at once (one round trip instead of up to six one after another):
+        //   the first unread page (catches role pings), your name pings, and @everyone/@here
+        const asks = [
+            quiet(search(guildId, base), "unread"),
+            uid ? quiet(search(guildId, Object.assign({ mentions: uid }, base)), "name") : Promise.resolve({ msgs: [] }),
+            quiet(search(guildId, Object.assign({ mention_everyone: true }, base)), "everyone"),
+        ];
+        const p = Promise.all(asks)
+            .then(([unread, named, everyone]) => {
+                let best = null;
+                unread.msgs.forEach((m) => pingsMe(m, uid, roles) && (best = olderOf(best, m.id)));
+                if (named.msgs[0]) best = olderOf(best, named.msgs[0].id);
+                if (everyone.msgs[0]) best = olderOf(best, everyone.msgs[0].id);
+                if (best) return { id: best, how: "oldest unread ping" };
+                // role ping further down than the first page: keep paging the unread messages
+                const page = (offset) => {
+                    if (!ack || offset >= 100) return Promise.resolve(null);
+                    return quiet(search(guildId, Object.assign({ offset }, base)), "unread").then(({ msgs }) => {
+                        const hit = msgs.find((m) => pingsMe(m, uid, roles));
+                        if (hit) return { id: hit.id, how: "oldest unread ping" };
+                        return msgs.length < 25 ? null : page(offset + 25);
+                    });
+                };
+                return unread.msgs.length < 25 ? null : page(25);
+            })
+            .then((r) => {
+                if (r) return r;
+                // nothing unread pings you: fall back to your newest ping, then where you stopped reading
+                return quiet(search(guildId, { channel_id: channelId, mentions: uid }), "newest").then(({ msgs }) =>
+                    msgs[0] ? { id: msgs[0].id, how: "newest name ping" } : ack ? { id: ack, how: "where you stopped reading" } : null);
+            })
             .then((r) => {
                 status.lastSearch = notes.join(", ");
+                if (r) found[channelId] = { ack, result: r };
+                delete inFlight[channelId];
                 return r;
+            }, () => {
+                delete inFlight[channelId];
+                return null;
             });
+        inFlight[channelId] = p;
+        return p;
+    }
+
+    // look up the top 3 pings in the background, spaced out (Discord limits how fast you can search)
+    function prefetch(guildId, list) {
+        list.slice(0, 3).forEach((c, i) => {
+            const ack = lastReadId(c.id);
+            const f = found[c.id];
+            if (inFlight[c.id] || (f && f.ack === ack) || cachedPing(guildId, c.id, ack)) return;
+            found[c.id] = { ack, result: null }; // mark as started for this read point
+            setTimeout(() => safe(() => findPingMessageId(guildId, c.id)), 300 + i * 800);
+        });
     }
 
     // Open the chat AT the message. jumpToMessage only scrolls a chat that is already open (from the
@@ -181,7 +253,7 @@
             return true;
         }, false);
         if (viaOpenUrl) {
-            [900, 1800].forEach((ms) =>
+            [450, 1100, 2000].forEach((ms) =>
                 setTimeout(() => safe(() => props("jump", "jumpToMessage").jumpToMessage({ channelId, messageId, flash: true, jumpType: "ANIMATED" })), ms),
             );
             return "openUrl";
@@ -206,9 +278,10 @@
 
     function jumpToPing(guildId, channel) {
         status.lastJump = `looking for the ping in #${channel.name}…`;
-        toast(`Ping Box: finding the ping in #${channel.name}…`);
-        return findPingMessageId(guildId, channel.id).then((found) => {
-            if (!found) {
+        const f = found[channel.id];
+        if (!(f && f.result) && !cachedPing(guildId, channel.id, lastReadId(channel.id))) toast(`Ping Box: finding the ping in #${channel.name}…`);
+        return findPingMessageId(guildId, channel.id).then((hit) => {
+            if (!hit) {
                 status.lastJump = `no message found for #${channel.name} (${status.lastSearch || "no search"}) -> opened channel`;
                 const ok = safe(() => {
                     props("openUrl", "openUrl").openUrl(`https://discord.com/channels/${guildId}/${channel.id}`);
@@ -223,9 +296,8 @@
                 toast(`Ping Box: couldn't find the exact ping in #${channel.name}${ok ? ", opened the channel" : ""} (${status.lastSearch || "no search"})`);
                 return;
             }
-            const via = navigate(guildId, channel.id, found.id);
-            if (via) toast(`Ping Box: opening the ping in #${channel.name}`);
-            status.lastJump = via ? `#${channel.name}: ${found.how} -> ${via}` : `#${channel.name}: found (${found.how}) but no way to open it`;
+            const via = navigate(guildId, channel.id, hit.id);
+            status.lastJump = via ? `#${channel.name}: ${hit.how} -> ${via}` : `#${channel.name}: found (${hit.how}) but no way to open it`;
             if (!via) toast("Ping Box: found the ping but couldn't open it");
         });
     }
@@ -253,6 +325,7 @@
         const guildId = safe(() => store("SelectedGuildStore").getGuildId(), null);
         const list = pingedChannels(guildId);
         if (!list.length || storage.enabled === false) return null;
+        safe(() => prefetch(guildId, list));
         return h(
             View,
             {
@@ -377,6 +450,7 @@
     return {
         onLoad() {
             safe(() => selfRepair("Ping Box"));
+            safe(() => metro.common.FluxDispatcher.subscribe("MESSAGE_CREATE", onMessageCreate));
             stopped = false;
             let tries = 0;
             const loop = () => {
@@ -387,6 +461,7 @@
         },
         onUnload() {
             stopped = true;
+            safe(() => metro.common.FluxDispatcher.unsubscribe("MESSAGE_CREATE", onMessageCreate));
             if (timer) clearTimeout(timer);
             unpatches.splice(0).forEach((u) => safe(u));
         },
